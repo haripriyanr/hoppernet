@@ -1,0 +1,21 @@
+# runtime logs + edge buffer database
+run/
+firmware/node_b/run/
+
+# Arduino / build artifacts
+build/
+*.o
+*.elf
+*.bin
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# opencode local config
+.opencode/
+session-*.md
