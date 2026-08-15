@@ -2,53 +2,84 @@
 
 **Jammer-Resilient FHSS Mesh with Edge Buffering** — a three-node wireless
 system where **Node A** talks to **Node C** through **Node B**, a smart
-store-and-forward relay.
+store-and-forward relay. A fourth node acts as an **active RF jammer** to test
+resilience.
 
-- **Node A (source)** — ESP32 + nRF24L01+
-- **Node B (relay / edge buffer)** — Raspberry Pi 4 + nRF24L01+
-- **Node C (destination)** — Arduino Due + nRF24L01+
+## Hardware
 
-The radio mesh uses pseudo-random **Frequency Hopping Spread Spectrum (FHSS)**:
-all nodes hop through a shared channel table in lockstep. When a channel is
-jammed, a node blacklists it and both ends deterministically skip it, keeping
-the link alive. When Node C goes unreachable, Node B **buffers packets locally**
-(ram + sqlite) and reliably delivers them once connectivity returns.
+| Device | Board | Module | Role |
+|--------|-------|--------|------|
+| Node A | ESP32 | nRF24L01+ | Source — sends frames |
+| Node B | Raspberry Pi 4 | nRF24L01+ | Relay + edge buffer (master clock) |
+| Node C | Arduino Due | nRF24L01+ | Destination — receives frames |
+| Jammer | ESP32 | nRF24L01+ | RF jammer — transmits on random channels |
+
+## Shopping list (4 modules)
+
+| # | Item | Purpose |
+|---|------|---------|
+| 1 | nRF24L01+ module | Node A |
+| 2 | nRF24L01+ module (bare preferred) | Node B (Pi) |
+| 3 | nRF24L01+ module | Node C |
+| 4 | nRF24L01+ module (PA/LNA preferred) | Jammer (stronger TX) |
+| 5 | 4× 10µF electrolytic caps | Brown-out protection at each module |
+| 6 | Jumper wires (M-M or M-F) | Connections |
 
 ## Repository layout
 
 ```
 firmware/
-  common/fhss.h      shared protocol: frame, CRC, PRNG, channel table, blacklist
-  node_a/            ESP32 source (Node A)
-  node_c/            Arduino Due destination (Node C)
-  node_b/            Raspberry Pi relay + edge buffer (Python)
+  libraries/fhss/src/fhss.h    shared protocol (Arduino library)
+  node_a/                      ESP32 source (Node A)
+  node_b/                      Pi relay + edge buffer (Python)
+  node_c/                      Arduino Due destination (Node C)
+  jammer/                      ESP32 nRF24L01+ RF jammer
 tools/
-  serial_logger.py   capture Node A/C serial logs into run/
+  serial_logger.py             capture serial logs to run/
 docs/
-  architecture.md    system design
-  protocol.md        FHSS frame / sync / blacklist protocol
-  wiring.md          nRF24L01+ wiring for all three boards
-run/                 runtime logs + edge-buffer DB (gitignored)
+  architecture.md              system design
+  protocol.md                  FHSS frame / sync / blacklist
+  wiring.md                    pinout for all boards + jammer
+scripts/
+  setup_pi.sh                  manual Pi provisioning
+  onboot.sh                    every-boot update + rebuild RF24
 ```
 
-## Quick start (3 steps)
+## Quick start
 
-1. **Wiring** — follow `docs/wiring.md` for each board.
-2. **Node B (Pi)** — run `scripts/setup_pi.sh` on the Pi (enables SPI, installs
-   RF24, sets up a systemd service), or run `relay.py` manually.
-3. **Node A & C** — flash with Arduino CLI:
-   ```
-   arduino-cli compile --fqbn esp32:esp32:esp32 firmware/node_a
-   arduino-cli upload -p COM8 --fqbn esp32:esp32:esp32 firmware/node_a
-   arduino-cli compile --fqbn arduino:sam:arduino_due_x_dbg firmware/node_c
-   arduino-cli upload -p COM9 --fqbn arduino:sam:arduino_due_x_dbg firmware/node_c
-   ```
-   Capture logs: `python tools/serial_logger.py --port COM8 --name node_a`
+1. **Wire** — follow `docs/wiring.md` for each board
+2. **Flash Node A** — `arduino-cli upload -p COM8 --fqbn esp32:esp32:esp32 firmware/node_a`
+3. **Flash Node C** — `arduino-cli upload -p COM9 --fqbn arduino:sam:arduino_due_x_dbg firmware/node_c`
+4. **Boot Pi** — SD card auto-provisions, WiFi connects, relay starts
+5. **Flash Jammer** — `arduino-cli upload -p <PORT> --fqbn esp32:esp32:esp32 firmware/jammer`
 
-## Diagnosis
+## Test procedure
 
-Every node leaves logs behind:
+### 2-node (Node A + Node B)
 
-- Node A / C → serial output, captured to `run/node_a.log` / `run/node_c.log`
-- Node B → `firmware/node_b/run/node_b.log` (on the Pi)
-- Edge buffer contents survive restarts in `run/edge_buffer.db`
+1. Wire 2 modules (ESP32 + Pi), boot Pi
+2. Open serial on COM8 — see `SYNC acquired` + stats
+3. Verify frames sent and buffered
+
+### 3-node (add Node C)
+
+1. Wire 3rd module to Due, flash Due
+2. Open serial on COM9 — see frames received via relay
+
+### Jammer test (4 nodes)
+
+1. Flash jammer to 4th ESP32 with 4th module
+2. Start all nodes, verify normal communication
+3. On jammer serial: `j` to start jamming
+4. Observe channel blacklisting + hopping on node serials
+5. `j` to stop — buffer drains, communication resumes
+6. `b` to sweep all 124 channels — maximum disruption
+
+### Serial monitoring
+
+```powershell
+python tools/serial_logger.py --port COM8 --name node_a
+python tools/serial_logger.py --port COM9 --name node_c
+```
+
+Pi logs: `ssh pi@nodeb 'tail -f /home/pi/hoppernet/firmware/node_b/run/node_b.log'`
