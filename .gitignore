@@ -16,6 +16,12 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Environment & credentials
+.env
+.env.*
+!.env.example
+firmware/**/config_secrets.h
+
 # opencode local config
 .opencode/
 session-*.md

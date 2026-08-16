@@ -9,10 +9,13 @@
 #define NODE_B            2
 #define NODE_C            3
 
+#define FHSS_SEED         0xC0FFEE01u
+
 #define FRAME_TYPE_SYNC       0x01
 #define FRAME_TYPE_DATA       0x02
 #define FRAME_TYPE_ACK        0x03
 #define FRAME_TYPE_JAMREPORT  0x04
+#define FRAME_TYPE_STATUS     0x05
 
 #define NUM_CHANNELS      124
 #define CHANNEL_BASE      2
@@ -27,6 +30,17 @@
 #define FLAG_ACK_REQ      0x01
 
 #define BLACKLIST_SIZE    ((NUM_CHANNELS + 7) / 8)
+
+struct fhss_telemetry {
+    uint32_t sent;
+    uint32_t acked;
+    uint32_t received;
+    uint16_t buffer_depth;
+    uint8_t  blacklist_count;
+    uint8_t  current_channel;
+    uint32_t current_hop;
+    uint8_t  synced;
+};
 
 struct fhss_frame {
     uint8_t magic;

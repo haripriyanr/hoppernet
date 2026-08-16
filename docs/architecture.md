@@ -1,56 +1,74 @@
-# Architecture
+# System Architecture — MedRelay (HopperNet)
 
-## Topology
+## 1. High-Level Topology
 
 ```
-         FHSS radio mesh (2.4 GHz, nRF24L01+)
-     ┌──────────┐  SYNC + DATA + ACK  ┌──────────────┐
-     │ Node A   │ ───────────────────▶ │ Node B       │
-     │ ESP32    │◀─────────────────── │ RPi 4 relay  │
-     │ source   │      ACK            │ edge buffer  │
-     └──────────┘                     └──────┬───────┘
-                                             │ DATA + ACK (FHSS)
-                                      ┌──────▼───────┐
-                                      │ Node C       │
-                                      │ Arduino Due  │
-                                      │ destination  │
-                                      └──────────────┘
+                              SUPABASE CLOUD & DASHBOARD
+                      ┌─────────────────────────────────────────┐
+                      │    Live 124-Channel Spectrum Heatmap    │
+                      │    Real-time Message Dispatch & Feed    │
+                      │    Telemetry & Edge Buffer Depth Gauge  │
+                      └────────────────────┬────────────────────┘
+                                           │ HTTPS REST & WebSockets
+                                 ┌─────────┴─────────┐
+                                 │   WiFi Network    │
+                                 │ (hoppernet/pass)  │
+                                 └─────────┬─────────┘
+                                           │
+             ┌─────────────────────────────┼─────────────────────────────┐
+             │                             │                             │
+    ┌────────▼────────┐           ┌────────▼────────┐           ┌────────▼────────┐
+    │  Node A (ESP32) │           │  Node B (ESP32) │           │  Node C (ESP32) │
+    │  Source Node    │           │  Relay & Master │           │  Destination    │
+    └────────┬────────┘           └────────┬────────┘           └────────┬────────┘
+             │                             │                             │
+             └────── SYNC / DATA / ACK ────┴────── DATA / ACK ───────────┘
+                       2.4 GHz FHSS Mesh (124 Channels, 25ms Dwell)
+                                           ▲
+                                           │ RF Interference
+                                  ┌────────┴────────┐
+                                  │  Jammer (ESP32) │
+                                  │ Active Adversary│
+                                  └─────────────────┘
 ```
 
-- **Node A** originates messages each dwell and waits for B's ACK.
-- **Node B** is the FHSS master clock, jammer authority, and store-and-forward
-  relay. It ACKs A, buffers locally, and drains toward C.
-- **Node C** receives from B, ACKs, and prints deliveries over serial.
+---
 
-## Edge buffering (the "pipe")
+## 2. Core Functional Pillars
 
-The core reliability feature lives on Node B:
+### A. Frequency Hopping Spread Spectrum (FHSS)
+- **124 Available RF Channels**: Spanning 2.402 GHz to 2.525 GHz (`CHANNEL_BASE = 2`).
+- **Synchronous PRNG**: `xorshift32` generator seeded with `0xC0FFEE01`.
+- **Dwell Time**: 25 ms per channel hop.
+- **Dwell Phase Windows**:
+  - `[0, 2 ms)`: **SYNC Window** — Node B (Master) broadcasts timestamp + hop counter + blacklist bitmap.
+  - `[2, 12 ms)`: **A ➔ B Window** — Node A transmits data to Node B; Node B returns an immediate ACK.
+  - `[12, 25 ms)`: **B ➔ C Window & Scan** — Node B transmits buffered frames to Node C; Node C returns ACK; Node B conducts quiet-tail carrier detection (`testCarrier()`).
 
-1. A transmits → B ACKs **immediately** (fast, lossless upstream handshake).
-2. B pushes into a thread-safe `EdgeBuffer` (ram + sqlite, survives reboot).
-3. B drains the buffer to C during the B→C dwell window, popping **only** on C's ACK.
-4. If C is offline (no ACK), the buffer **holds and retries** — nothing is dropped.
+### B. Dynamic Channel Blacklisting & Jammer Avoidance
+- Node B monitors the nRF24 Received Power Detector (RPD) register during quiet slots.
+- Consecutive carrier hits flag a channel as jammed.
+- Blacklisted channels are set in a 16-byte bitmap broadcast in every SYNC beacon.
+- All nodes run the shared `channel_for_hop()` algorithm, deterministically skipping blacklisted channels in lockstep without losing timing sync.
 
-## Jammer resilience
+### C. Persistent Store-and-Forward Edge Buffering
+- Node B acts as the intelligent buffer relay.
+- When Node A sends a frame, Node B ACKs immediately upstream and enqueues the packet into its in-memory circular buffer and **SPIFFS flash filesystem**.
+- Frames are only removed from Node B's storage when Node C issues a positive downstream ACK.
+- If Node C goes offline or experiences severe jamming, packets safely accumulate in Node B and drain in strict FIFO order once Node C recovers.
 
-- Deterministic FHSS: `channel_for_hop(hop, seed, blacklist)` computes the same
-  channel on all three nodes.
-- Node B detects a jammed channel via RPD carrier scans and blacklists it.
-- Blacklist propagates in SYNC frames → all nodes skip the bad channel in
-  lockstep. Hopping continues on good channels.
+### D. Dual-Core Asynchronous Architecture (FreeRTOS)
+Every ESP32 node divides duties across hardware CPU cores:
+- **Core 1 (Real-Time RF Engine)**: Manages microsecond-precise SPI transactions, dwell timing, carrier scans, and radio interrupts without jitter.
+- **Core 0 (Cloud & Network Engine)**: Manages WiFi connectivity, HTTPS REST polling/pushing to Supabase, and real-time telemetry streaming.
 
-## Time synchronization
+---
 
-- B is master (monotonic clock). SYNC carries `master_ts` + hop index.
-- A/C compute a clock offset and derive `hop = master_time / dwell`, so channel
-  switches happen at the same instant on every node.
-- Losing sync triggers a full channel scan; re-acquisition is automatic.
+## 3. Database & Cloud Schema (Supabase)
 
-## Logging & diagnostics
-
-| Node | Medium | Location |
-|------|--------|----------|
-| A    | serial | `run/node_a.log` (via `tools/serial_logger.py`) |
-| B    | file   | `firmware/node_b/run/node_b.log` |
-| C    | serial | `run/node_c.log` |
-| Buffer state | sqlite | `firmware/node_b/run/edge_buffer.db` |
+| Table | Purpose |
+| :--- | :--- |
+| `messages` | Outbound dispatch queue (Phone ➔ Node A ➔ Mesh). Status transitions: `pending` ➔ `sent` ➔ `delivered`. |
+| `received_messages` | Inbound delivery log pushed by Node C upon physical receipt. |
+| `telemetry` | Live health stats from Nodes A, B, and C (sent, acked, received, buffer depth, channel, hop). |
+| `blacklist_events` | Interference log capturing jammed channel numbers and timestamps. |

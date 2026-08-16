@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MedRelay | Jammer-Resilient FHSS Mesh Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- Supabase JS CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Navigation -->
+        <header class="navbar">
+            <div class="brand">
+                <div class="brand-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.2 19.1 19.1"/></svg>
+                </div>
+                <div class="brand-text">
+                    <h1>MEDRELAY <span class="badge">FHSS MESH</span></h1>
+                    <p class="subtitle">Jammer-Resilient Spectrum-Pipe with Store-and-Forward Edge Buffering</p>
+                </div>
+            </div>
+            <div class="nav-status">
+                <div class="status-indicator">
+                    <span class="pulse-dot" id="cloud-status-dot"></span>
+                    <span id="cloud-status-text">Cloud Sync Active</span>
+                </div>
+                <div class="quick-stats">
+                    <div class="q-item"><span>CHANNELS</span> <strong id="stat-total-ch">124</strong></div>
+                    <div class="q-item"><span>BLACKLISTED</span> <strong id="stat-blacklisted-count" class="danger">0</strong></div>
+                    <div class="q-item"><span>BUFFER DEPTH</span> <strong id="stat-buffer-depth" class="warning">0</strong></div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Grid Layout -->
+        <main class="dashboard-grid">
+            <!-- Left Column: Mesh Nodes & Spectrum Heatmap -->
+            <section class="grid-left">
+                <!-- Node Telemetry Cards -->
+                <div class="card-deck">
+                    <!-- Node A -->
+                    <div class="node-card" id="card-node-a">
+                        <div class="node-header">
+                            <span class="node-role">NODE A — SOURCE</span>
+                            <span class="node-chip" id="chip-node-a">SYNCING</span>
+                        </div>
+                        <div class="node-body">
+                            <div class="metric"><span class="label">RF Outbound</span> <span class="val" id="node-a-sent">0</span></div>
+                            <div class="metric"><span class="label">ACKs Received</span> <span class="val" id="node-a-acked">0</span></div>
+                            <div class="metric"><span class="label">Current Hop</span> <span class="val font-mono" id="node-a-hop">0</span></div>
+                        </div>
+                    </div>
+
+                    <!-- Node B (Relay) -->
+                    <div class="node-card highlight" id="card-node-b">
+                        <div class="node-header">
+                            <span class="node-role">NODE B — RELAY / MASTER</span>
+                            <span class="node-chip active" id="chip-node-b">MASTER CLOCK</span>
+                        </div>
+                        <div class="node-body">
+                            <div class="metric"><span class="label">Store & Fwd Buffer</span> <span class="val warning" id="node-b-buffer">0 pkts</span></div>
+                            <div class="metric"><span class="label">Relayed to C</span> <span class="val" id="node-b-relayed">0</span></div>
+                            <div class="metric"><span class="label">Jammed Channels</span> <span class="val danger" id="node-b-jammed">0</span></div>
+                        </div>
+                    </div>
+
+                    <!-- Node C -->
+                    <div class="node-card" id="card-node-c">
+                        <div class="node-header">
+                            <span class="node-role">NODE C — DESTINATION</span>
+                            <span class="node-chip" id="chip-node-c">SYNCING</span>
+                        </div>
+                        <div class="node-body">
+                            <div class="metric"><span class="label">Delivered Inbound</span> <span class="val success" id="node-c-received">0</span></div>
+                            <div class="metric"><span class="label">Delivery Ratio</span> <span class="val font-mono" id="node-c-pdr">100%</span></div>
+                            <div class="metric"><span class="label">Sync Health</span> <span class="val font-mono" id="node-c-sync">OK</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 124-Channel Spectrum Grid Visualizer -->
+                <div class="panel spectrum-panel">
+                    <div class="panel-header">
+                        <div class="title-group">
+                            <h2>2.4 GHz ISM Spectrum Heatmap</h2>
+                            <span class="sub">124 Channels (2.402 GHz – 2.525 GHz) | 25ms Hopping Dwell</span>
+                        </div>
+                        <div class="legend">
+                            <span class="leg-item"><i class="dot current"></i> Active Hop</span>
+                            <span class="leg-item"><i class="dot jammed"></i> Jammed / Blacklisted</span>
+                            <span class="leg-item"><i class="dot clean"></i> Clean</span>
+                        </div>
+                    </div>
+                    <div class="spectrum-grid" id="spectrum-grid">
+                        <!-- Populated by JS: 124 Channel Blocks -->
+                    </div>
+                </div>
+
+                <!-- Blacklist & Jammer Detection Stream -->
+                <div class="panel events-panel">
+                    <div class="panel-header">
+                        <h2>Interference & Carrier Detection Log</h2>
+                        <span class="badge danger" id="events-count">0 events</span>
+                    </div>
+                    <div class="events-list" id="events-list">
+                        <div class="empty-state">No interference detected. All RF channels operating normally.</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column: Message Dispatcher & Inbound Stream -->
+            <section class="grid-right">
+                <!-- Dispatcher Form -->
+                <div class="panel dispatcher-panel">
+                    <div class="panel-header">
+                        <h2>Emergency Dispatch (Node A Outbound)</h2>
+                        <span class="badge primary">Phone / Cloud Push</span>
+                    </div>
+                    <form id="msg-form" class="msg-form">
+                        <div class="quick-presets">
+                            <button type="button" class="preset-btn" data-msg="CODE BLUE: RM 302">🚨 Code Blue</button>
+                            <button type="button" class="preset-btn" data-msg="TRAUMA ALERT: ICU">⚠️ Trauma Alert</button>
+                            <button type="button" class="preset-btn" data-msg="VITALS CRITICAL: HR 145">💓 Vitals Spike</button>
+                            <button type="button" class="preset-btn" data-msg="EVACUATE WING B">🔥 Evacuation</button>
+                        </div>
+                        <div class="input-group">
+                            <input type="text" id="msg-input" placeholder="Type critical medical alert or telemetry..." maxlength="23" required autocomplete="off">
+                            <button type="submit" class="send-btn" id="send-btn">
+                                <span>DISPATCH</span>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Inbound Delivered Messages Feed -->
+                <div class="panel feed-panel">
+                    <div class="panel-header">
+                        <h2>Delivered Feed (Node C Inbound)</h2>
+                        <span class="badge success" id="feed-count">0 received</span>
+                    </div>
+                    <div class="feed-container" id="feed-container">
+                        <div class="empty-state">Waiting for frames from Node C sink...</div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

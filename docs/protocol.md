@@ -1,63 +1,67 @@
-# hoppernet protocol
+# HopperNet Protocol Specification (v4.0)
 
-## Frame format
+## 1. Frame Structure
 
-All RF24 payloads are fixed `MAX_FRAME_LEN = 32` bytes.
+All nRF24L01+ payloads are fixed at **32 bytes** (`MAX_FRAME_LEN = 32`) to ensure fixed transmission air-time and deterministic slot boundaries.
 
 ```
-offset  size  field
-0       1     magic = 0x5A
-1       1     type   = SYNC(0x01) | DATA(0x02) | ACK(0x03)
-2       1     src    = node id (1=A, 2=B, 3=C)
-3       1     dst    = node id, 0 = broadcast
-4       1     seq    = sequence number
-5       1     hop    = hop index (mod 256)
-6       1     flags  = bit0 ACK_REQ
-7       1     crc    = CRC-8 over payload[0..23]
-8..31   24    payload
+Offset  Size  Field        Description
+0       1     magic        Protocol identifier byte: 0x5A
+1       1     type         Frame Type: SYNC (0x01), DATA (0x02), ACK (0x03), STATUS (0x05)
+2       1     src          Source Node ID: 1=Node A, 2=Node B, 3=Node C
+3       1     dst          Destination ID: 1=A, 2=B, 3=C, 0=Broadcast
+4       1     seq          Sequence counter (0–255)
+5       1     hop_index    Hop counter mod 256
+6       1     flags        bit 0: ACK_REQ
+7       1     crc          CRC-8 computed over payload[0..23] (poly 0x07)
+8..31   24    payload      Frame-specific payload data
 ```
 
-### Payloads
+---
 
-- **SYNC** (B → broadcast): `hop_index:u32`, `master_ts_us:u32`, blacklist
-  bitmap (124 bits = 16 bytes).
-- **DATA** (A→B or B→C): `len:u8`, then `len` bytes of text payload.
-- **ACK** (B→A or C→B): `ack_seq:u8`, `0x0D` marker.
+## 2. Payload Layouts
 
-## FHSS hop scheduling
+### A. SYNC Frame (`type = 0x01`, Broadcast from Node B)
+- `payload[0..3]`: 32-bit Hop Index (`uint32_t`)
+- `payload[4..7]`: 32-bit Master Microsecond Timestamp (`uint32_t`)
+- `payload[8..23]`: 16-byte (128-bit) Blacklist Bitmap covering channels 2–125
 
-- Channel table: 124 channels, `2..125`. PRNG = xorshift32.
-- `channel_for_hop(hop, seed, blacklist)`: deterministic — same algorithm on
-  every node keeps A/B/C in lockstep, **skipping blacklisted channels** so both
-  ends stay synchronized.
-- **Dwell = 25 ms.** Within each dwell:
-  - `[0, 2 ms)` — B broadcasts **SYNC** on the current channel
-  - `[2, 12 ms)` — **A → B** data, B acks
-  - `[12, 25 ms)` — **B → C** data drain, C acks, jammer carrier scan
+### B. DATA Frame (`type = 0x02`, A ➔ B or B ➔ C)
+- `payload[0]`: Payload length in bytes ($L \le 23$)
+- `payload[1..L]`: UTF-8 Message or telemetry string ($L$ bytes)
+- `payload[L+1..23]`: Zero padding
 
-## Synchronization
+### C. ACK Frame (`type = 0x03`, B ➔ A or C ➔ B)
+- `payload[0]`: Acknowledged sequence number
+- `payload[1]`: Status code (`0x0D` = SUCCESS / STORED)
 
-- Node B is the **master clock**. Its SYNC frame carries the master microsecond
-  timestamp and current hop index.
-- Nodes A/C compute `clock_offset = master_ts - local_micros`, then derive hop /
-  channel from master time. Each SYNC re-aligns the clock and refreshes the
-  blacklist.
-- **Loss of sync** → node scans all channels (`2..125`) listening for SYNC,
-  re-acquires, and jumps back into the schedule.
+---
 
-## Jammer detection / avoidance
+## 3. Hopping Schedule & Phase Breakdown
 
-- Node B calls `radio.testCarrier()` (nRF24 RPD) during the quiet tail of each
-  hop. Consecutive carrier detects on a channel blacklist it.
-- The blacklist rides along in every SYNC frame, so A and C adopt the same
-  forbidden set → the shared `channel_for_hop` algorithm keeps everyone hopping
-  on identical *good* channels.
+- **Total Dwell Time**: 25,000 µs (25 ms) per channel hop.
+- **Spectrum**: 124 RF channels (channels 2 to 125, $2400 + \text{ch}$ MHz).
 
-## Store-and-forward edge buffering
+```
+0 ms              2 ms                     12 ms                                 25 ms
+├── SYNC Phase ───┼── A ➔ B Data Window ───┼── B ➔ C Data Drain & Carrier Scan ──┤
+│   B Broadcasts  │   A sends to B         │   B sends to C, C acks              │
+│   Sync Beacon   │   B sends ACK          │   B tests carrier in quiet tail     │
+```
 
-- Node B ACKs A immediately on receipt, then pushes into the **EdgeBuffer**
-  (ram `deque` + sqlite at `run/edge_buffer.db`).
-- A background drain (inside the same loop) forwards to C during the B→C window
-  and pops only on C's ACK.
-- **C unreachable** → packets accumulate in the buffer; on recovery they drain
-  in order. Buffer survives power loss via sqlite.
+---
+
+## 4. Deterministic Channel Selection Algorithm
+
+```c
+uint8_t channel_for_hop(uint32_t hop, uint32_t seed, const uint8_t *blacklist) {
+    uint32_t state = seed ^ (hop * 2654435761u);
+    for (int attempt = 0; attempt < NUM_CHANNELS * 2; attempt++) {
+        state = xorshift32(state);
+        uint8_t ch = (uint8_t)(CHANNEL_BASE + (state % NUM_CHANNELS));
+        if (!blacklist_get(blacklist, ch)) return ch;
+    }
+    return (uint8_t)(CHANNEL_BASE + (hop % NUM_CHANNELS));
+}
+```
+When a channel is blacklisted, every node running this function automatically skips it in lockstep without exchanging negotiation packets.

@@ -1,80 +1,62 @@
-# Wiring — nRF24L01+ to each board
+# Hardware Wiring — nRF24L01+ to ESP32
 
-All nodes use an **nRF24L01+** module (SPI). The jammer also uses an nRF24L01+
-module. Note the module is **3.3V logic** — never power it from 5V.
+All nodes in the HopperNet / MedRelay mesh use an **ESP32 DevKit** connected to an **nRF24L01+** 2.4 GHz transceiver module via SPI.
 
-## Node A — ESP32 (source)
+> [!WARNING]
+> **Logic Level & Power**: The nRF24L01+ is **3.3V logic only**. Always connect `VCC` to the ESP32's **3.3V** pin, never 5V. Connecting to 5V will permanently destroy the radio chip.
 
-| nRF24L01+ | ESP32 pin |
-|-----------|-----------|
-| VCC       | 3.3V      |
-| GND       | GND       |
-| CE        | GPIO4     |
-| CSN       | GPIO5     |
-| SCK       | GPIO18    |
-| MOSI      | GPIO23    |
-| MISO      | GPIO19    |
-| IRQ       | (optional, unused) |
+---
 
-## Node B — Raspberry Pi 4 (relay)
+## 1. Mesh Nodes A, B, and C (Identical Pinout)
 
-| nRF24L01+ | RPi header pin |
-|-----------|----------------|
-| VCC       | 17 (3.3V)     |
-| GND       | 25 (GND)      |
-| CE        | 15 (GPIO22)   |
-| CSN       | 24 (CE0)      |
-| SCK       | 23 (SCLK)     |
-| MOSI      | 19 (MOSI)     |
-| MISO      | 21 (MISO)     |
-| IRQ       | (optional)    |
+Because Nodes A, B, and C are on separate ESP32 boards, they share the exact same hardware pinout:
 
-Enable SPI first: `sudo raspi-config` → Interface Options → SPI → Yes.
+| nRF24L01+ Pin | ESP32 Pin | Function / Description |
+| :--- | :--- | :--- |
+| **VCC** | **3.3V** | Module Power (3.3V DC rail) |
+| **GND** | **GND** | Ground Common |
+| **CE** | **GPIO 4** | Chip Enable (TX/RX mode switch) |
+| **CSN** | **GPIO 5** | Chip Select Not (SPI bus select) |
+| **SCK** | **GPIO 18** | SPI Serial Clock |
+| **MOSI** | **GPIO 23** | SPI Master Out Slave In |
+| **MISO** | **GPIO 19** | SPI Master In Slave Out |
+| **IRQ** | *(Unused)* | Optional interrupt (polling mode used) |
 
-## Node C — Arduino Due (destination)
+---
 
-| nRF24L01+ | Due pin |
-|-----------|---------|
-| VCC       | 3.3V    |
-| GND       | GND     |
-| CE        | D9      |
-| CSN       | D10     |
-| SCK       | D76 (ICSP SCLK) |
-| MOSI      | D75 (ICSP MOSI) |
-| MISO      | D74 (ICSP MISO) |
-| IRQ       | (optional) |
+## 2. Jammer / Adversary Node (ESP32 #4)
 
-## Jammer — ESP32 (RF jammer)
+The Jammer runs on a dedicated 4th ESP32 board using alternative GPIO pins for CE/CSN to avoid any confusion:
 
-| nRF24L01+ | ESP32 pin |
-|-----------|-----------|
-| VCC       | 3.3V      |
-| GND       | GND       |
-| CE        | GPIO25    |
-| CSN       | GPIO26    |
-| SCK       | GPIO18    |
-| MOSI      | GPIO23    |
-| MISO      | GPIO19    |
-| IRQ       | (optional, unused) |
+| nRF24L01+ Pin | ESP32 Pin | Function / Description |
+| :--- | :--- | :--- |
+| **VCC** | **3.3V** | Module Power |
+| **GND** | **GND** | Ground |
+| **CE** | **GPIO 25** | Chip Enable |
+| **CSN** | **GPIO 26** | Chip Select Not |
+| **SCK** | **GPIO 18** | SPI Clock |
+| **MOSI** | **GPIO 23** | SPI MOSI |
+| **MISO** | **GPIO 19** | SPI MISO |
 
-Same SPI bus as Node A but **different CE/CSN**. Do NOT run Node A and Jammer
-on the same ESP32 simultaneously — use separate boards.
+---
 
-## Common notes
+## 3. Power Stability & Decoupling Capacitor
 
-- Add a **10 µF electrolytic capacitor across VCC/GND** right at the nRF24L01+;
-  the module has sharp current spikes that can brown-out the MCU. This is
-  **critical for the +PA/LNA antenna modules** (up to 115 mA TX current).
-- Keep module antenna area clear of ground planes / wires.
-- If using a bare module, add a decoupling cap (0.1 µF) close to VCC.
+> [!IMPORTANT]
+> **Add a 10 µF Electrolytic Capacitor** directly across the `VCC` and `GND` pins of every nRF24L01+ module.
+> - High-frequency RF transmissions generate sharp current transients (~15 mA on bare modules, up to 115 mA on PA/LNA modules) which cause voltage dips on the 3.3V rail.
+> - Without this capacitor, the ESP32 or nRF24L01+ may reset intermittently or fail SPI initialization (`RF24 init FAILED`).
 
-## Shopping list (4 modules)
+---
 
-| # | Module | For | Notes |
-|---|--------|-----|-------|
-| 1 | nRF24L01+ (bare or PA/LNA) | Node A (ESP32) | |
-| 2 | nRF24L01+ (bare or PA/LNA) | Node B (Pi) | Bare recommended for Pi3.3V rail |
-| 3 | nRF24L01+ (bare or PA/LNA) | Node C (Due) | |
-| 4 | nRF24L01+ (PA/LNA preferred) | Jammer (ESP32) | Higher TX power = stronger jamming |
-| — | 4× 10µF electrolytic caps | All nodes | Brown-out protection |
-| — | Jumper wires (M-M or M-F) | All nodes | |
+## 4. Hardware Inventory Summary
+
+| # | Item | Purpose | Quantity |
+|---|------|---------|:--------:|
+| 1 | ESP32 Dev Board (Node A) | Source Node (Dispatches telemetry & alerts) | 1 |
+| 2 | ESP32 Dev Board (Node B) | Relay + Edge Buffer + Master Clock | 1 |
+| 3 | ESP32 Dev Board (Node C) | Destination Sink Node | 1 |
+| 4 | ESP32 Dev Board (Jammer) | Active RF Interference Generator | 1 |
+| 5 | nRF24L01+ Transceiver Modules | 2.4 GHz ISM Radios (PA/LNA preferred for jammer) | 4 |
+| 6 | 10 µF Electrolytic Capacitors | Power line smoothing at radio header | 4 |
+| 7 | Female-to-Female Jumper Wires | Interconnects | 28 |
