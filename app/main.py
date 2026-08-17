@@ -175,12 +175,20 @@ async def send_message(req: SendMessageRequest):
             target_node = n
             break
 
+    dispatched = False
+    if target_node and target_node.ser and target_node.ser.is_open:
+        try:
+            target_node.ser.write(f"SEND:{req.content}\n".encode("utf-8"))
+            dispatched = True
+        except Exception as e:
+            print(f"Error sending serial to {req.source}: {e}")
+
     entry = {
         "id": int(time.time() * 1000),
         "source": req.source,
         "target": req.target,
         "content": req.content,
-        "status": "dispatched" if target_node else "queued_cloud",
+        "status": "transmitted_rf" if dispatched else "device_not_connected",
         "ts": time.strftime("%H:%M:%S")
     }
     chat_history.append(entry)
