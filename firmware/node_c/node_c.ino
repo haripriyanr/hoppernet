@@ -523,13 +523,15 @@ void loop() {
         }
     }
 
-    // Sync Timeout Watchdog: Fast recovery within 600ms
-    if (synced && (millis() - last_sync_time_ms > 600)) {
+    // 3. Autonomous Flywheel Watchdog (Lee et al. 2026 Hybrid Coarse/Fine Architecture)
+    // Maintain autonomous mathematical hopping lock even under severe beacon loss.
+    // Only drop lock if NO beacon is received for over 5000ms (200 missed hops).
+    if (synced && (millis() - last_sync_time_ms > 5000)) {
         synced = 0;
-        Serial.println(F("[NODE_C] SYNC TIMEOUT — Re-scanning with Park-Listen..."));
+        Serial.println(F("[NODE_C] ⚠️ Flywheel Expired (>5000ms no beacon) — Entering Coarse Serial Acquisition..."));
     }
 
-    // If Unsynced: Park on each channel for 80ms to catch the master beacon
+    // Stage 1: Coarse Acquisition (Park-and-Listen on each channel for 80ms)
     static uint32_t last_scan_switch_ms = 0;
     if (!synced) {
         if (millis() - last_scan_switch_ms >= 80) {
@@ -540,7 +542,7 @@ void loop() {
         return;
     }
 
-    // 3. Synced Execution: Hop in exact lockstep
+    // Stage 2: Fine Tracking & Autonomous Slotted Flywheel Execution
     uint32_t now_master = (uint32_t)((int32_t)micros() + clock_offset);
     uint32_t hop = now_master / DWELL_US;
     uint32_t phase = now_master % DWELL_US;
