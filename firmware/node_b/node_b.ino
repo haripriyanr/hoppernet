@@ -1,5 +1,6 @@
-// HopperNet Node B — Master Relay & Dual-Direction Edge Buffer (Arduino Due)
-// Hardware: Arduino Due (SAM3X8E ARM @ 84MHz) + nRF24L01+ + 16x2 I2C LCD
+// HopperNet Node B — Master Relay & Dual-Direction Edge Buffer (ESP32)
+// Hardware: ESP32 DevKit + nRF24L01+ + 16x2 I2C LCD (SDA: GPIO 21, SCL: GPIO 22)
+// 100% Local & Cloudless: 520 KB RAM + 4 MB Flash Storage
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -8,21 +9,24 @@
 #include <RF24.h>
 #include "fhss.h"
 
-// ---------------- Hardware & Pin Config (Arduino Due) ----------------
-#define CE_PIN          9
-#define CSN_PIN         10
+// ---------------- Hardware & Pin Config (ESP32) ----------------
+#define RF_CE_PIN       4
+#define RF_CSN_PIN      5
+#define LCD_SDA_PIN     21
+#define LCD_SCL_PIN     22
+
 #define ROLE            NODE_B
 #define NODE_SRC        NODE_A
 #define NODE_DST        NODE_C
 #define BAUD            115200
 
-#define BUFFER_MAX_ITEMS 128
+#define BUFFER_MAX_ITEMS 256
 
 // ---------------- LCD & Radio State ----------------
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 bool lcd_available = false;
 
-RF24 radio(CE_PIN, CSN_PIN);
+RF24 radio(RF_CE_PIN, RF_CSN_PIN);
 static uint8_t blacklist[BLACKLIST_SIZE];
 static uint32_t hop_counter = 0;
 static uint32_t last_hop = 0xFFFFFFFF;
@@ -197,17 +201,18 @@ void setup() {
     Serial.begin(BAUD);
     delay(1000);
     Serial.println(F("=========================================="));
-    Serial.println(F(" HopperNet Node B — Bidirectional Relay   "));
+    Serial.println(F(" HopperNet NODE B — Relay (ESP32 + LCD)   "));
     Serial.println(F("=========================================="));
 
     blacklist_clear_all(blacklist);
     memset(jam_counts, 0, sizeof(jam_counts));
 
-    Wire.begin();
+    // Initialize 16x2 I2C LCD on ESP32 SDA(21), SCL(22)
+    Wire.begin(LCD_SDA_PIN, LCD_SCL_PIN);
     lcd.init();
     lcd.backlight();
     lcd.setCursor(0, 0);
-    lcd.print(F("MEDRELAY DUAL-B "));
+    lcd.print(F("MEDRELAY ESP-B  "));
     lcd.setCursor(0, 1);
     lcd.print(F("BOOTING MESH... "));
     lcd_available = true;
@@ -228,7 +233,7 @@ void setup() {
     radio.setAutoAck(false);
     radio.startListening();
 
-    Serial.println(F("[NODE_B] Mesh ready. Starting bidirectional clock..."));
+    Serial.println(F("[NODE_B] Mesh ready. Starting bidirectional master clock..."));
     if (lcd_available) lcd.clear();
 }
 

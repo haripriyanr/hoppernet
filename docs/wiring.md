@@ -1,130 +1,104 @@
-# Hardware Wiring Guide — HopperNet (MedRelay)
-
-Complete wiring specifications for the 4-node competition setup:
-- **Node A (Source)**: ESP32 DevKit
-- **Node B (Relay & Edge Buffer)**: Arduino Due + 16×2 I2C LCD
-- **Node C (Destination)**: ESP32 DevKit
-- **Jammer (Adversary Console)**: Arduino Mega 2560 + 3.5" Touchscreen
+# Complete Hardware Pinout & Wiring Cheatsheet
 
 ---
 
-## 1. nRF24L01+ 8-Pin Header Reference
-
-Looking directly at the **2×4 pin header** on the back of the nRF24 module (with the antenna facing **UP**):
-
-```
-          [ ANTENNA ]
-     ┌───────────────────┐
-     │  (1) GND │ (2) VCC│  <-- 3.3V ONLY (Never 5V!)
-     │  (3) CE  │ (4) CSN│
-     │  (5) SCK │ (6) MOSI
-     │  (7) MISO│ (8) IRQ│
-     └───────────────────┘
-```
-
-> [!CAUTION]
-> **Power Rule**: Connect `VCC` **ONLY to 3.3V**. Connecting to 5V will destroy the radio module.
->
-> **Capacitor Rule**: Solder or insert a **10 µF electrolytic capacitor** directly between `VCC (+)` and `GND (-)` on each nRF24 module.
+## ⚡ Global Power & Safety Rules
+1. **nRF24L01+ Power**: Connect **ONLY to 3.3V**. Connecting to 5V will destroy the radio module.
+2. **Capacitor Rule (CRITICAL)**: Solder or bridge a **10 µF electrolytic (or 100 nF ceramic) capacitor** across `VCC` and `GND` directly at the nRF24 module pins to prevent voltage dropouts during RF transmission spikes.
+3. **16×2 I2C LCD Power**: Connect `VCC` to **5V (VIN)** on the ESP32 (or 3.3V if your backpack supports 3.3V) and `GND` to ESP32 **GND**.
 
 ---
 
-## 2. Node A (ESP32 — Source)
+## 1. Node A — Source Endpoint (ESP32 DevKit)
+**Role**: Dispatches emergency messages, telemetry, vitals, and image packets. Connected to PC via USB.
 
-| nRF24L01+ Pin | ESP32 Pin | Wire Type | Purpose |
-| :--- | :--- | :---: | :--- |
-| **VCC** | **3.3V** | F-F | Power (3.3V DC) |
-| **GND** | **GND** | F-F | Ground |
-| **CE** | **GPIO 4** | F-F | Chip Enable |
-| **CSN** | **GPIO 5** | F-F | SPI Chip Select |
-| **SCK** | **GPIO 18** | F-F | SPI Clock |
-| **MOSI** | **GPIO 23** | F-F | SPI Data In |
-| **MISO** | **GPIO 19** | F-F | SPI Data Out |
+| nRF24L01+ Pin | ESP32 Pin | Wire Type | Description |
+| :--- | :--- | :--- | :--- |
+| **VCC (Pin 2)** | **3.3V** | Female–Female | Radio Power (3.3V ONLY) |
+| **GND (Pin 1)** | **GND** | Female–Female | Common Ground |
+| **CE (Pin 3)** | **GPIO 4** | Female–Female | Chip Enable / TX/RX mode |
+| **CSN (Pin 4)** | **GPIO 5** | Female–Female | SPI Chip Select |
+| **SCK (Pin 5)** | **GPIO 18** | Female–Female | Hardware VSPI Clock |
+| **MOSI (Pin 6)** | **GPIO 23** | Female–Female | Hardware VSPI Master Out |
+| **MISO (Pin 7)** | **GPIO 19** | Female–Female | Hardware VSPI Master In |
+| **IRQ (Pin 8)** | *Unconnected* | — | Not used |
 
-*Total Wires for Node A: 7× Female-to-Female (F-F)*
-
----
-
-## 3. Node B (Arduino Due — Master Relay & 16×2 LCD)
-
-### A. nRF24L01+ $\rightarrow$ Arduino Due (Central SPI Header)
-*Note: Hardware SPI on the Due is on the **central 6-pin header**.*
-
-```
-                 [ USB Ports ]
-                       ▲
-                ┌─────────────┐
- (MISO) Pin 1   │  ●       ●  │ Pin 2 (5V - DO NOT USE!)
-  (SCK) Pin 3   │  ●       ●  │ Pin 4 (MOSI)
-(Reset) Pin 5   │  ●       ●  │ Pin 6 (GND)
-                └─────────────┘
-```
-
-| nRF24L01+ Pin | Arduino Due Pin | Wire Type | Purpose |
-| :--- | :--- | :---: | :--- |
-| **VCC** | **3.3V (Power Header)** | M-F | 3.3V Power |
-| **GND** | **GND (Power Header)** | M-F | Ground |
-| **CE** | **Pin 9 (D9)** | M-F | Chip Enable |
-| **CSN** | **Pin 10 (D10)** | M-F | SPI Chip Select |
-| **SCK** | **SPI Header Pin 3** | F-F | SPI Clock (center header middle-left) |
-| **MOSI** | **SPI Header Pin 4** | F-F | SPI MOSI (center header middle-right) |
-| **MISO** | **SPI Header Pin 1** | F-F | SPI MISO (center header top-left) |
-
-### B. 16×2 I2C LCD $\rightarrow$ Arduino Due
-| 16×2 LCD Pin | Arduino Due Pin | Wire Type |
-| :--- | :--- | :---: |
-| **VCC** | **5V (Power Header)** | M-F |
-| **GND** | **GND (Power Header)** | M-F |
-| **SDA** | **Pin 20 (SDA)** | M-F |
-| **SCL** | **Pin 21 (SCL)** | M-F |
-
-*Total Wires for Node B: 3× Female-to-Female (F-F) + 8× Male-to-Female (M-F)*
+*Total Wires Needed for Node A*: **7× Female-to-Female**
 
 ---
 
-## 4. Node C (ESP32 — Destination Sink)
+## 2. Node B — Master Relay & Edge Buffer (ESP32 DevKit + 16×2 LCD)
+**Role**: Master FHSS clock, dual-direction in-memory store-and-forward edge buffer (520KB RAM), 16×2 LCD display.
 
-| nRF24L01+ Pin | ESP32 Pin | Wire Type | Purpose |
-| :--- | :--- | :---: | :--- |
-| **VCC** | **3.3V** | F-F | Power (3.3V DC) |
-| **GND** | **GND** | F-F | Ground |
-| **CE** | **GPIO 4** | F-F | Chip Enable |
-| **CSN** | **GPIO 5** | F-F | SPI Chip Select |
-| **SCK** | **GPIO 18** | F-F | SPI Clock |
-| **MOSI** | **GPIO 23** | F-F | SPI Data In |
-| **MISO** | **GPIO 19** | F-F | SPI Data Out |
+### A. Radio Wiring (nRF24L01+):
+| nRF24L01+ Pin | ESP32 Pin | Wire Type | Description |
+| :--- | :--- | :--- | :--- |
+| **VCC (Pin 2)** | **3.3V** | Female–Female | Radio Power (3.3V ONLY) |
+| **GND (Pin 1)** | **GND** | Female–Female | Ground |
+| **CE (Pin 3)** | **GPIO 4** | Female–Female | Chip Enable |
+| **CSN (Pin 4)** | **GPIO 5** | Female–Female | SPI Chip Select |
+| **SCK (Pin 5)** | **GPIO 18** | Female–Female | VSPI Clock |
+| **MOSI (Pin 6)** | **GPIO 23** | Female–Female | VSPI Master Out |
+| **MISO (Pin 7)** | **GPIO 19** | Female–Female | VSPI Master In |
 
-*Total Wires for Node C: 7× Female-to-Female (F-F)*
+### B. 16×2 I2C LCD Wiring (I2C Backpack):
+| 16×2 LCD Pin | ESP32 Pin | Wire Type | Description |
+| :--- | :--- | :--- | :--- |
+| **VCC** | **5V (VIN)** | Female–Female | LCD Logic & Backlight Power |
+| **GND** | **GND** | Female–Female | Common Ground |
+| **SDA** | **GPIO 21** | Female–Female | I2C Data |
+| **SCL** | **GPIO 22** | Female–Female | I2C Clock |
 
----
-
-## 5. Jammer (Arduino Mega 2560 — RF Adversary & 3.5" Touchscreen)
-
-### A. nRF24L01+ $\rightarrow$ Arduino Mega 2560
-| nRF24L01+ Pin | Arduino Mega Pin | Wire Type | Purpose |
-| :--- | :--- | :---: | :--- |
-| **VCC** | **3.3V (Power Header)** | M-F | 3.3V Power |
-| **GND** | **GND (Power Header)** | M-F | Ground |
-| **CE** | **Pin 9** | M-F | Chip Enable |
-| **CSN** | **Pin 53** | M-F | SPI Chip Select (SS) |
-| **SCK** | **Pin 52** | M-F | SPI Clock |
-| **MOSI** | **Pin 51** | M-F | SPI MOSI |
-| **MISO** | **Pin 50** | M-F | SPI MISO |
-
-### B. 3.5" TFT Touchscreen Shield
-- Plugs directly on top of the Mega's main header (Pins D2–D13, A0–A5).
-- Pins 50–53 on the rear double row remain open and accessible for the nRF24L01+ wires.
-
-*Total Wires for Jammer: 7× Male-to-Female (M-F)*
+*Total Wires Needed for Node B*: **11× Female-to-Female**
 
 ---
 
-## 6. Master Shopping & Jumper Wire Checklist
+## 3. Node C — Destination Endpoint (ESP32 DevKit)
+**Role**: Destination sink. Receives messages from Node A, sends ACKs and return messages back through Node B.
 
-| Connection Group | Female-to-Female (F-F) | Male-to-Female (M-F) |
-| :--- | :---: | :---: |
-| **Node A (ESP32)** | 7 | 0 |
-| **Node B (Due + 16×2 LCD)** | 3 | 8 |
-| **Node C (ESP32)** | 7 | 0 |
-| **Jammer (Mega 2560)** | 0 | 7 |
-| **TOTAL TO GRAB** | **17 wires** | **15 wires** |
+| nRF24L01+ Pin | ESP32 Pin | Wire Type | Description |
+| :--- | :--- | :--- | :--- |
+| **VCC (Pin 2)** | **3.3V** | Female–Female | Radio Power (3.3V ONLY) |
+| **GND (Pin 1)** | **GND** | Female–Female | Ground |
+| **CE (Pin 3)** | **GPIO 4** | Female–Female | Chip Enable |
+| **CSN (Pin 4)** | **GPIO 5** | Female–Female | SPI Chip Select |
+| **SCK (Pin 5)** | **GPIO 18** | Female–Female | VSPI Clock |
+| **MOSI (Pin 6)** | **GPIO 23** | Female–Female | VSPI Master Out |
+| **MISO (Pin 7)** | **GPIO 19** | Female–Female | VSPI Master In |
+| **IRQ (Pin 8)** | *Unconnected* | — | Not used |
+
+*Total Wires Needed for Node C*: **7× Female-to-Female**
+
+---
+
+## 4. Jammer — Adversary Console (Arduino Mega 2560 + 3.5" Touchscreen)
+**Role**: Standalone RF carrier blaster with 3.5" TFT touchscreen interface & serial CLI.
+
+### A. 3.5" Touchscreen Shield:
+- **Plugs directly onto the Arduino Mega 2560 main headers** (covers pins D2–D13, A0–A5, 5V, GND). **Zero wires needed!**
+
+### B. High-Power nRF24L01+ PA/LNA Radio Wiring (Back Header):
+Connect to the 2-row header at the bottom/back edge of the Arduino Mega (pins 50–53):
+
+| nRF24L01+ PA/LNA Pin | Arduino Mega Pin | Wire Type | Description |
+| :--- | :--- | :--- | :--- |
+| **VCC (Pin 2)** | **3.3V** (or dedicated 3.3V adapter) | Male–Female | Radio Power (3.3V ONLY) |
+| **GND (Pin 1)** | **GND** | Male–Female | Common Ground |
+| **CE (Pin 3)** | **Pin 9** (or D9 on pass-through) | Male–Female | Chip Enable |
+| **CSN (Pin 4)** | **Pin 53** | Male–Female | Hardware SPI SS |
+| **SCK (Pin 5)** | **Pin 52** | Male–Female | Hardware SPI SCK |
+| **MOSI (Pin 6)** | **Pin 51** | Male–Female | Hardware SPI MOSI |
+| **MISO (Pin 7)** | **Pin 50** | Male–Female | Hardware SPI MISO |
+
+*Total Wires Needed for Jammer*: **7× Male-to-Female**
+
+---
+
+## Total Jumper Wire Inventory Checklist
+
+- **Female-to-Female (F-F)**: **25 wires**
+  - Node A: 7
+  - Node B: 11
+  - Node C: 7
+- **Male-to-Female (M-F)**: **7 wires**
+  - Jammer: 7
