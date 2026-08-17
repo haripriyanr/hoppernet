@@ -877,6 +877,85 @@ def slide_cloud(prs):
         ("WebSocket",      "Real-time telemetry",      GREEN),
     ])
 
+# ==========================================================================
+# SLIDE 8.5 — ADVANCED DASHBOARD & DIAGNOSTICS
+# ==========================================================================
+def slide_dashboard_features(prs):
+    s = blank(prs)
+    bgfill(s, prs)
+    header(s,
+           "Criteria 4  |  Advanced Dashboard & Diagnostics  |  3 Marks",
+           "Real-Time Health Monitoring & Self-Healing",
+           "New features: RSSI gauges, PDR tracking, channel scoring, and PLL clock filters")
+
+    CW = Inches(5.8)
+    CH = Inches(2.35)
+    r1 = Inches(1.72)
+    r2 = r1 + CH + Inches(0.18)
+    c1 = Inches(0.7)
+    c2 = c1 + CW + Inches(0.23)
+
+    # 1. RSSI
+    rect(s, c1, r1, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, c1+Inches(0.18), r1+Inches(0.1), CW-Inches(0.36), Inches(0.24),
+       "1. Real-Time RSSI Monitoring", 10.5, CYAN, bold=True)
+    hline(s, c1+Inches(0.18), r1+Inches(0.38), CW-Inches(0.36), DIVIDER)
+    items1 = [
+        "Real-time signal strength calculation in dBm (ranging from -95 dBm to -30 dBm).",
+        "Live visual RSSI gauge bar broadcast to all local web portals.",
+        "Allows doctors and technicians to physically locate RF dead-zones by watching the dashboard."
+    ]
+    y = r1 + Inches(0.48)
+    for body in items1:
+        tb(s, c1+Inches(0.22), y, CW-Inches(0.44), Inches(0.4), f"• {body}", 9, GREY)
+        y += Inches(0.45)
+
+    # 2. PDR
+    rect(s, c2, r1, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, c2+Inches(0.18), r1+Inches(0.1), CW-Inches(0.36), Inches(0.24),
+       "2. Packet Delivery Ratio (PDR) & Loss Tracking", 10.5, GREEN, bold=True)
+    hline(s, c2+Inches(0.18), r1+Inches(0.38), CW-Inches(0.36), DIVIDER)
+    items2 = [
+        "Real-time PDR computation: PDR = (Acked / Sent) × 100%.",
+        "Live Sent / Acked / Lost counters visible on both endpoint terminals.",
+        "Implements a 3-hop ARQ retransmission window before declaring a packet timeout or loss."
+    ]
+    y = r1 + Inches(0.48)
+    for body in items2:
+        tb(s, c2+Inches(0.22), y, CW-Inches(0.44), Inches(0.4), f"• {body}", 9, GREY)
+        y += Inches(0.45)
+
+    # 3. Channel Quality
+    rect(s, c1, r2, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, c1+Inches(0.18), r2+Inches(0.1), CW-Inches(0.36), Inches(0.24),
+       "3. Per-Channel Quality Scoring & Self-Healing", 10.5, AMBER, bold=True)
+    hline(s, c1+Inches(0.18), r2+Inches(0.38), CW-Inches(0.36), DIVIDER)
+    items3 = [
+        "Maintains a 124-channel health score array (0% to 100% per channel).",
+        "Corrupted channels instantly lose 15-20 points upon packet collision.",
+        "Clean channels slowly heal (+1 point per successful hop).",
+        "Visual Channel Quality bar rendered directly on the web portals."
+    ]
+    y = r2 + Inches(0.48)
+    for body in items3:
+        tb(s, c1+Inches(0.22), y, CW-Inches(0.44), Inches(0.4), f"• {body}", 9, GREY)
+        y += Inches(0.4)
+
+    # 4. PLL Filter
+    rect(s, c2, r2, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, c2+Inches(0.18), r2+Inches(0.1), CW-Inches(0.36), Inches(0.24),
+       "4. Software PLL Clock Filter (Zero Drift)", 10.5, ACCENT, bold=True)
+    hline(s, c2+Inches(0.18), r2+Inches(0.38), CW-Inches(0.36), DIVIDER)
+    items4 = [
+        "Exponential Moving Average (EMA) PLL filter applied on every 25 ms SYNC beacon.",
+        "Mathematically eliminates crystal oscillator ppm drift indefinitely over long deployments.",
+        "600 ms fast-watchdog recovery automatically triggers if the radio signal is physically blocked."
+    ]
+    y = r2 + Inches(0.48)
+    for body in items4:
+        tb(s, c2+Inches(0.22), y, CW-Inches(0.44), Inches(0.4), f"• {body}", 9, GREY)
+        y += Inches(0.45)
+
 
 # ==========================================================================
 # SLIDE 9 — VALIDATION & DEMO (Criteria 5, 2 marks)
@@ -1141,6 +1220,7 @@ def build():
     slide_rf_spectrum(prs)
     slide_firmware(prs)
     slide_cloud(prs)
+    slide_dashboard_features(prs)
     slide_validation(prs)
     slide_planning(prs)
     slide_defense(prs)

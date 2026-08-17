@@ -385,7 +385,7 @@ void setup() {
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
-    WiFi.softAP(NODE_C_SSID, WIFI_PASS_COMMON, 1, 0, 4);
+    WiFi.softAP(NODE_C_SSID, WIFI_PASS_COMMON, 11, 0, 4);
 
     Serial.print(F("[WIFI] Access Point: "));
     Serial.println(NODE_C_SSID);

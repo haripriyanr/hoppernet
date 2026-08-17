@@ -188,19 +188,40 @@ void broadcast_sync(uint32_t hop, uint32_t master_ts) {
     radio.startListening();
 }
 
+static uint32_t blacklist_hop[NUM_CHANNELS] = {0}; // Hop index when channel was blacklisted
+
 void scan_jammer() {
     bool carrier = radio.testCarrier();
     uint8_t ch = radio.getChannel();
     if (ch >= CHANNEL_BASE && ch < CHANNEL_BASE + NUM_CHANNELS) {
         int idx = ch - CHANNEL_BASE;
+        
+        // 1. Check if an already blacklisted channel has cooled down (Aging: 200 hops = 5 seconds)
+        if (blacklist_get(blacklist, ch)) {
+            if (stats_current_hop - blacklist_hop[idx] > 200) {
+                blacklist_clear(blacklist, ch);
+                stats_blacklist_count = blacklist_count(blacklist);
+                channel_scores[idx] = 80; // Restored to clean pool
+                jam_counts[idx] = 0;
+                Serial.print(F("[NODE_B] UN-BLACKLISTED channel "));
+                Serial.print(ch);
+                Serial.print(F(" after 5s cooldown (Active: "));
+                Serial.print(stats_blacklist_count);
+                Serial.println(F(")"));
+            }
+            return;
+        }
+
+        // 2. Detect Persistent Jamming (Require 8 consecutive carrier hits)
         if (carrier) {
             jam_counts[idx]++;
-            if (channel_scores[idx] >= 15) channel_scores[idx] -= 15; // Degrading channel score
-            if (jam_counts[idx] >= 4 && !blacklist_get(blacklist, ch)) {
+            if (channel_scores[idx] >= 10) channel_scores[idx] -= 10;
+            if (jam_counts[idx] >= 8 && !blacklist_get(blacklist, ch)) {
                 blacklist_set(blacklist, ch);
+                blacklist_hop[idx] = stats_current_hop;
                 stats_blacklist_count = blacklist_count(blacklist);
-                channel_scores[idx] = 0; // Blacklisted channel quality = 0%
-                Serial.print(F("[NODE_B] JAMMER DETECTED -> Blacklisted channel "));
+                channel_scores[idx] = 0;
+                Serial.print(F("[NODE_B] 🚨 RF JAMMER DETECTED -> Blacklisted channel "));
                 Serial.print(ch);
                 Serial.print(F(" (total: "));
                 Serial.print(stats_blacklist_count);
@@ -209,7 +230,7 @@ void scan_jammer() {
             }
         } else {
             if (jam_counts[idx] > 0) jam_counts[idx]--;
-            if (channel_scores[idx] < 100) channel_scores[idx] += 1; // Self-healing recovery
+            if (channel_scores[idx] < 100) channel_scores[idx] += 1; // Self-healing
         }
     }
 }
@@ -408,7 +429,7 @@ void setup() {
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
-    WiFi.softAP(NODE_B_SSID, WIFI_PASS_COMMON, 1, 0, 4);
+    WiFi.softAP(NODE_B_SSID, WIFI_PASS_COMMON, 6, 0, 4);
 
     Serial.print(F("[WIFI] Access Point: "));
     Serial.println(NODE_B_SSID);
