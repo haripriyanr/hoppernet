@@ -1,13 +1,20 @@
-// HopperNet RF Jammer & Interference Simulator — ESP32 + nRF24L01+
-// Supports Random Hopping, Continuous Lock, Sweeping, Targeted, and Adaptive Modes.
+// HopperNet RF Jammer & Adversary Console (Arduino Mega 2560)
+// Hardware: Arduino Mega 2560 + nRF24L01+ + Optional 3.5" Touchscreen Shield
 
 #include <Arduino.h>
 #include <SPI.h>
 #include <RF24.h>
 #include "fhss.h"
-#include "fhss_config.h"
 
-RF24 radio(JAMMER_CE_PIN, JAMMER_CSN_PIN);
+// ---------------- Hardware & Pin Config (Arduino Mega 2560) ----------------
+#define CE_PIN          9
+#define CSN_PIN         53
+#define BAUD            115200
+
+#define CHANNEL_BASE    2
+#define NUM_CHANNELS    124
+
+RF24 radio(CE_PIN, CSN_PIN);
 
 enum JammerMode {
     JAM_RANDOM,
@@ -46,17 +53,25 @@ void startJammer() {
     radio.setAutoAck(false);
     radio.setChannel(currentChannel);
     for (int i = 0; i < 32; i++) junk[i] = random(0x00, 0xFF);
-    Serial.printf("[JAMMER] ACTIVE | mode=%d | ch=%d | PA=%s | dwell=%d ms\n",
-                  mode, currentChannel, PA_NAMES[paIndex], dwellTime);
+    Serial.print(F("[JAMMER] ACTIVE | mode="));
+    Serial.print(mode);
+    Serial.print(F(" | ch="));
+    Serial.print(currentChannel);
+    Serial.print(F(" | PA="));
+    Serial.print(PA_NAMES[paIndex]);
+    Serial.print(F(" | dwell="));
+    Serial.print(dwellTime);
+    Serial.println(F(" ms"));
 }
 
 void stopJammer() {
     radio.startListening();
-    Serial.printf("[JAMMER] STOPPED | total tx=%lu\n", (unsigned long)txCount);
+    Serial.print(F("[JAMMER] STOPPED | total tx="));
+    Serial.println(txCount);
 }
 
 void sweepAllChannels() {
-    Serial.println("[JAMMER] Sweeping all 124 channels...");
+    Serial.println(F("[JAMMER] Sweeping all 124 channels..."));
     for (int ch = CHANNEL_BASE; ch < CHANNEL_BASE + NUM_CHANNELS; ch++) {
         radio.setChannel(ch);
         for (int i = 0; i < 4; i++) {
@@ -65,34 +80,51 @@ void sweepAllChannels() {
             txCount++;
         }
     }
-    Serial.printf("[JAMMER] Sweep complete (tx=%lu)\n", (unsigned long)txCount);
+    Serial.print(F("[JAMMER] Sweep complete (tx="));
+    Serial.print(txCount);
+    Serial.println(F(")"));
+}
+
+void printStatus() {
+    Serial.print(F("[JAMMER] "));
+    Serial.print(jamming ? F("JAMMING") : F("IDLE"));
+    Serial.print(F(" | Mode: "));
+    Serial.print(mode);
+    Serial.print(F(" | Ch: "));
+    Serial.print(currentChannel);
+    Serial.print(F(" | PA: "));
+    Serial.print(PA_NAMES[paIndex]);
+    Serial.print(F(" | Dwell: "));
+    Serial.print(dwellTime);
+    Serial.print(F(" ms | TX: "));
+    Serial.println(txCount);
 }
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(BAUD);
     delay(1000);
     randomSeed(analogRead(0));
 
     if (!radio.begin()) {
-        Serial.println("[JAMMER] RF24 initialization FAILED — verify wiring!");
+        Serial.println(F("[JAMMER] RF24 init FAILED — check wiring (Mega pins 50-53, CE=9, CSN=53)"));
         while (1) delay(100);
     }
 
-    Serial.println("==========================================");
-    Serial.println("  HopperNet Adversary & RF Jammer v4.0   ");
-    Serial.println("  2.4 GHz ISM Spectrum (Channels 2–125)   ");
-    Serial.println("==========================================");
-    Serial.println("Commands:");
-    Serial.println("  j          — Toggle Jamming ON / OFF");
-    Serial.println("  c <2-125>  — Lock onto specific RF Channel");
-    Serial.println("  r          — Random Channel Hopping Mode");
-    Serial.println("  a          — Adaptive Mesh-Tracking Mode");
-    Serial.println("  b          — Instant Full-Band 124-Channel Sweep");
-    Serial.println("  d <ms>     — Set Dwell Duration (ms)");
-    Serial.println("  p <0-3>    — Set Power Level (0:LOW, 3:MAX)");
-    Serial.println("  s          — Status Summary");
-    Serial.println("==========================================");
-    Serial.println("Ready. Type 'j' to start.");
+    Serial.println(F("=========================================="));
+    Serial.println(F("  HopperNet Adversary & RF Jammer (Mega)  "));
+    Serial.println(F("  2.4 GHz ISM Spectrum (Channels 2–125)   "));
+    Serial.println(F("=========================================="));
+    Serial.println(F("Commands (Serial or Touchscreen):"));
+    Serial.println(F("  j          — Toggle Jamming ON / OFF"));
+    Serial.println(F("  c <2-125>  — Lock onto specific RF Channel"));
+    Serial.println(F("  r          — Random Channel Hopping Mode"));
+    Serial.println(F("  a          — Adaptive Mesh-Tracking Mode"));
+    Serial.println(F("  b          — Instant Full-Band 124-Channel Sweep"));
+    Serial.println(F("  d <ms>     — Set Dwell Duration (ms)"));
+    Serial.println(F("  p <0-3>    — Set Power (0:MIN, 1:LOW, 2:HIGH, 3:MAX)"));
+    Serial.println(F("  s          — Print Status Summary"));
+    Serial.println(F("=========================================="));
+    Serial.println(F("Ready. Type 'j' to start."));
 }
 
 void loop() {
@@ -115,7 +147,7 @@ void loop() {
                 txCount++;
             }
             lastAction = millis();
-        } else if (mode == JAM_ADAPTIVE && millis() - lastAction > 25) { // Tracks 25ms mesh dwell
+        } else if (mode == JAM_ADAPTIVE && millis() - lastAction > 25) {
             simulated_hop++;
             currentChannel = channel_for_hop(simulated_hop, FHSS_SEED, dummy_empty_blacklist);
             radio.setChannel(currentChannel);
@@ -141,18 +173,19 @@ void loop() {
                 if (ch >= CHANNEL_BASE && ch < CHANNEL_BASE + NUM_CHANNELS) {
                     setChannel(ch);
                     mode = JAM_LOCKED;
-                    Serial.printf("[JAMMER] Locked to channel %d\n", currentChannel);
+                    Serial.print(F("[JAMMER] Locked to channel "));
+                    Serial.println(currentChannel);
                 }
                 break;
             }
             case 'r':
                 mode = JAM_RANDOM;
-                Serial.println("[JAMMER] Switched to Random Hopping Mode");
+                Serial.println(F("[JAMMER] Switched to Random Hopping Mode"));
                 break;
             case 'a':
                 mode = JAM_ADAPTIVE;
                 simulated_hop = micros() / DWELL_US;
-                Serial.println("[JAMMER] Switched to Adaptive Mesh-Tracking Mode");
+                Serial.println(F("[JAMMER] Switched to Adaptive Mesh-Tracking Mode"));
                 break;
             case 'b':
                 sweepAllChannels();
@@ -161,7 +194,9 @@ void loop() {
                 int ms = Serial.parseInt();
                 if (ms > 0) {
                     dwellTime = ms;
-                    Serial.printf("[JAMMER] Dwell set to %d ms\n", dwellTime);
+                    Serial.print(F("[JAMMER] Dwell set to "));
+                    Serial.print(dwellTime);
+                    Serial.println(F(" ms"));
                 }
                 break;
             }
@@ -171,14 +206,13 @@ void loop() {
                     paIndex = p;
                     paLevel = PA_VALS[paIndex];
                     if (jamming) radio.setPALevel(paLevel);
-                    Serial.printf("[JAMMER] PA level set to %s\n", PA_NAMES[paIndex]);
+                    Serial.print(F("[JAMMER] PA level set to "));
+                    Serial.println(PA_NAMES[paIndex]);
                 }
                 break;
             }
             case 's':
-                Serial.printf("[JAMMER] %s | Mode: %d | Ch: %d | PA: %s | Dwell: %d ms | TX: %lu\n",
-                              jamming ? "JAMMING" : "IDLE", mode, currentChannel,
-                              PA_NAMES[paIndex], dwellTime, (unsigned long)txCount);
+                printStatus();
                 break;
         }
     }

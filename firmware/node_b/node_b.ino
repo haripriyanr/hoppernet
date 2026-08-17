@@ -1,24 +1,29 @@
+// HopperNet Node B — Master Relay & Store-and-Forward Edge Buffer (Arduino Due)
+// Hardware: Arduino Due (SAM3X8E ARM @ 84MHz) + nRF24L01+ + 16x2 I2C LCD
+
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 #include <RF24.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
-#include <FS.h>
-#include <SPIFFS.h>
 #include "fhss.h"
-#include "fhss_config.h"
 
-// ---------------- Hardware & Role Config ----------------
+// ---------------- Hardware & Pin Config (Arduino Due) ----------------
+#define CE_PIN          9
+#define CSN_PIN         10
 #define ROLE            NODE_B
 #define DST_A           NODE_A
 #define DST_C           NODE_C
 #define BAUD            115200
 
-#define BUFFER_MAX_ITEMS 128
-#define BUFFER_FILE      "/edge_buffer.dat"
+#define BUFFER_MAX_ITEMS 256  // 256 packets stored in Due's 96 KB SRAM (~6.6 KB)
 
-// ---------------- Node State ----------------
-RF24 radio(RF_CE_PIN, RF_CSN_PIN);
+// ---------------- LCD & Radio State ----------------
+// Standard I2C LCD on Due pins 20 (SDA) / 21 (SCL). Default address 0x27 (or 0x3F).
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+bool lcd_available = false;
+
+RF24 radio(CE_PIN, CSN_PIN);
 static uint8_t blacklist[BLACKLIST_SIZE];
 static uint32_t hop_counter = 0;
 static uint32_t last_hop = 0xFFFFFFFF;
@@ -26,18 +31,19 @@ static uint8_t last_channel = 255;
 static uint8_t jam_counts[NUM_CHANNELS];
 
 // Stats
-static volatile uint32_t stats_sent_c = 0;
-static volatile uint32_t stats_acked_c = 0;
-static volatile uint32_t stats_recv_a = 0;
-static volatile uint16_t stats_buffer_depth = 0;
-static volatile uint8_t  stats_blacklist_count = 0;
-static volatile uint8_t  stats_current_ch = 0;
-static volatile uint32_t stats_current_hop = 0;
+static uint32_t stats_sent_c = 0;
+static uint32_t stats_acked_c = 0;
+static uint32_t stats_recv_a = 0;
+static uint16_t stats_buffer_depth = 0;
+static uint8_t  stats_blacklist_count = 0;
+static uint8_t  stats_current_ch = 0;
+static uint32_t stats_current_hop = 0;
+static uint32_t last_lcd_update_ms = 0;
 
 // Deduplication
 static uint8_t last_seen_seq_a[256] = {0};
 
-// In-memory + Persistent Edge Buffer structure
+// In-Memory Edge Buffer structure
 struct BufferedPacket {
     uint8_t seq;
     uint8_t len;
@@ -48,42 +54,9 @@ static BufferedPacket ring_buffer[BUFFER_MAX_ITEMS];
 static int buf_head = 0;
 static int buf_tail = 0;
 static int buf_count = 0;
-static portMUX_TYPE bufferMux = portMUX_INITIALIZER_UNLOCKED;
 
-// Blacklist notification queue
-static int pending_blacklist_ch = -1;
-
-// ---------------- Buffer Operations (RAM + SPIFFS) ----------------
-void save_buffer_to_spiffs() {
-    File f = SPIFFS.open(BUFFER_FILE, FILE_WRITE);
-    if (!f) return;
-    f.write((uint8_t*)&buf_count, sizeof(buf_count));
-    for (int i = 0; i < buf_count; i++) {
-        int idx = (buf_tail + i) % BUFFER_MAX_ITEMS;
-        f.write((uint8_t*)&ring_buffer[idx], sizeof(BufferedPacket));
-    }
-    f.close();
-}
-
-void load_buffer_from_spiffs() {
-    if (!SPIFFS.exists(BUFFER_FILE)) return;
-    File f = SPIFFS.open(BUFFER_FILE, FILE_READ);
-    if (!f) return;
-    if (f.read((uint8_t*)&buf_count, sizeof(buf_count)) == sizeof(buf_count)) {
-        if (buf_count > BUFFER_MAX_ITEMS) buf_count = BUFFER_MAX_ITEMS;
-        buf_tail = 0;
-        buf_head = buf_count % BUFFER_MAX_ITEMS;
-        for (int i = 0; i < buf_count; i++) {
-            f.read((uint8_t*)&ring_buffer[i], sizeof(BufferedPacket));
-        }
-        Serial.printf("[NODE_B] Restored %d packets from persistent SPIFFS storage\n", buf_count);
-    }
-    f.close();
-}
-
+// ---------------- Buffer Operations (SRAM Ring Buffer) ----------------
 bool buffer_push(uint8_t seq, const char *data, uint8_t len) {
-    bool ok = false;
-    portENTER_CRITICAL(&bufferMux);
     if (buf_count < BUFFER_MAX_ITEMS) {
         ring_buffer[buf_head].seq = seq;
         ring_buffer[buf_head].len = (len < PAYLOAD_LEN) ? len : (PAYLOAD_LEN - 1);
@@ -92,33 +65,25 @@ bool buffer_push(uint8_t seq, const char *data, uint8_t len) {
         buf_head = (buf_head + 1) % BUFFER_MAX_ITEMS;
         buf_count++;
         stats_buffer_depth = buf_count;
-        ok = true;
+        return true;
     }
-    portEXIT_CRITICAL(&bufferMux);
-    if (ok) save_buffer_to_spiffs();
-    return ok;
+    return false;
 }
 
 bool buffer_peek(BufferedPacket *out) {
-    bool ok = false;
-    portENTER_CRITICAL(&bufferMux);
     if (buf_count > 0) {
         *out = ring_buffer[buf_tail];
-        ok = true;
+        return true;
     }
-    portEXIT_CRITICAL(&bufferMux);
-    return ok;
+    return false;
 }
 
 void buffer_pop() {
-    portENTER_CRITICAL(&bufferMux);
     if (buf_count > 0) {
         buf_tail = (buf_tail + 1) % BUFFER_MAX_ITEMS;
         buf_count--;
         stats_buffer_depth = buf_count;
     }
-    portEXIT_CRITICAL(&bufferMux);
-    save_buffer_to_spiffs();
 }
 
 // ---------------- Helper Functions ----------------
@@ -162,9 +127,11 @@ void scan_jammer() {
             if (jam_counts[idx] >= 3 && !blacklist_get(blacklist, ch)) {
                 blacklist_set(blacklist, ch);
                 stats_blacklist_count = blacklist_count(blacklist);
-                pending_blacklist_ch = ch;
-                Serial.printf("[NODE_B] JAMMER DETECTED -> Blacklisted channel %u (total: %u)\n", 
-                              ch, stats_blacklist_count);
+                Serial.print(F("[NODE_B] JAMMER DETECTED -> Blacklisted channel "));
+                Serial.print(ch);
+                Serial.print(F(" (total: "));
+                Serial.print(stats_blacklist_count);
+                Serial.println(F(")"));
                 jam_counts[idx] = 0;
             }
         } else {
@@ -173,80 +140,47 @@ void scan_jammer() {
     }
 }
 
-// ---------------- Background WiFi & Supabase Task (Core 0) ----------------
-void networkTask(void *param) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(HOPPERNET_WIFI_SSID, HOPPERNET_WIFI_PASS);
-    Serial.println("[NET] Connecting to WiFi: " HOPPERNET_WIFI_SSID);
+void update_lcd() {
+    if (!lcd_available) return;
+    char line0[17];
+    char line1[17];
+    snprintf(line0, sizeof(line0), "CH:%-3u  HOP:%-5lu", stats_current_ch, (unsigned long)(stats_current_hop % 100000));
+    snprintf(line1, sizeof(line1), "BUF:%-2u pk JAM:%-2u", stats_buffer_depth, stats_blacklist_count);
 
-    uint32_t last_telemetry_ms = 0;
-    while (true) {
-        if (WiFi.status() == WL_CONNECTED) {
-            // Report Telemetry every 3 seconds
-            if (millis() - last_telemetry_ms >= 3000) {
-                last_telemetry_ms = millis();
-                HTTPClient http;
-                String url = String(HOPPERNET_SUPABASE_URL) + "/rest/v1/telemetry";
-                http.begin(url);
-                http.addHeader("Content-Type", "application/json");
-                http.addHeader("apikey", HOPPERNET_SUPABASE_KEY);
-                http.addHeader("Authorization", String("Bearer ") + HOPPERNET_SUPABASE_KEY);
-
-                char json[256];
-                snprintf(json, sizeof(json),
-                         "{\"node\":\"node_b\",\"sent\":%lu,\"acked\":%lu,\"received\":%lu,"
-                         "\"buffer_depth\":%u,\"blacklist_count\":%u,\"current_channel\":%u,"
-                         "\"current_hop\":%lu,\"synced\":true}",
-                         (unsigned long)stats_sent_c, (unsigned long)stats_acked_c,
-                         (unsigned long)stats_recv_a, stats_buffer_depth,
-                         stats_blacklist_count, stats_current_ch, (unsigned long)stats_current_hop);
-
-                int code = http.POST(json);
-                http.end();
-            }
-
-            // Report Blacklist Events
-            if (pending_blacklist_ch > 0) {
-                int ch = pending_blacklist_ch;
-                pending_blacklist_ch = -1;
-                HTTPClient http;
-                String url = String(HOPPERNET_SUPABASE_URL) + "/rest/v1/blacklist_events";
-                http.begin(url);
-                http.addHeader("Content-Type", "application/json");
-                http.addHeader("apikey", HOPPERNET_SUPABASE_KEY);
-                http.addHeader("Authorization", String("Bearer ") + HOPPERNET_SUPABASE_KEY);
-
-                char json[160];
-                snprintf(json, sizeof(json),
-                         "{\"channel\":%d,\"action\":\"blacklisted\",\"reason\":\"RPD carrier threshold exceeded\"}",
-                         ch);
-                http.POST(json);
-                http.end();
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
+    lcd.setCursor(0, 0);
+    lcd.print(line0);
+    lcd.setCursor(0, 1);
+    lcd.print(line1);
 }
 
-// ---------------- Setup & Core 1 RF Loop ----------------
+// ---------------- Setup ----------------
 void setup() {
     Serial.begin(BAUD);
     delay(1000);
-    Serial.println("==========================================");
-    Serial.println("  HopperNet Node B — Relay & Master Clock ");
-    Serial.println("==========================================");
+    Serial.println(F("=========================================="));
+    Serial.println(F("  HopperNet Node B — Master Relay (Due)   "));
+    Serial.println(F("=========================================="));
 
     blacklist_clear_all(blacklist);
     memset(jam_counts, 0, sizeof(jam_counts));
 
-    if (!SPIFFS.begin(true)) {
-        Serial.println("[NODE_B] SPIFFS mount failed!");
-    } else {
-        load_buffer_from_spiffs();
-    }
+    // Initialize 16x2 LCD
+    Wire.begin();
+    lcd.init();
+    lcd.backlight();
+    lcd.setCursor(0, 0);
+    lcd.print(F("MEDRELAY NODE B "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("BOOTING MESH... "));
+    lcd_available = true;
+    delay(800);
 
     if (!radio.begin()) {
-        Serial.println("[NODE_B] RF24 init FAILED — check wiring!");
+        Serial.println(F("[NODE_B] RF24 init FAILED — check wiring!"));
+        if (lcd_available) {
+            lcd.clear();
+            lcd.print(F("RF24 INIT FAILED"));
+        }
         while (1) delay(100);
     }
 
@@ -256,12 +190,11 @@ void setup() {
     radio.setAutoAck(false);
     radio.startListening();
 
-    // Launch Core 0 Network Task
-    xTaskCreatePinnedToCore(networkTask, "NetworkTask", 8192, NULL, 1, NULL, 0);
-
-    Serial.println("[NODE_B] Mesh ready. Starting master FHSS clock...");
+    Serial.println(F("[NODE_B] Mesh ready. Starting master FHSS clock..."));
+    if (lcd_available) lcd.clear();
 }
 
+// ---------------- Loop ----------------
 void loop() {
     uint32_t now_us = micros();
     uint32_t hop = now_us / DWELL_US;
@@ -292,7 +225,13 @@ void loop() {
                 if (last_seen_seq_a[rx.seq] == 0) {
                     last_seen_seq_a[rx.seq] = 1;
                     buffer_push(rx.seq, msg, plen);
-                    Serial.printf("[NODE_B] RX A#%u: \"%s\" (Buffer: %d)\n", rx.seq, msg, stats_buffer_depth);
+                    Serial.print(F("[NODE_B] RX A#"));
+                    Serial.print(rx.seq);
+                    Serial.print(F(": \""));
+                    Serial.print(msg);
+                    Serial.print(F("\" (Buffer: "));
+                    Serial.print(stats_buffer_depth);
+                    Serial.println(F(")"));
                 }
 
                 // Send ACK immediately
@@ -354,11 +293,21 @@ void loop() {
             if (got_ack) {
                 buffer_pop();
                 stats_acked_c++;
-                Serial.printf("[NODE_B] Delivered C#%u OK (Buffer: %d)\n", pkt.seq, stats_buffer_depth);
+                Serial.print(F("[NODE_B] Delivered C#"));
+                Serial.print(pkt.seq);
+                Serial.print(F(" OK (Buffer: "));
+                Serial.print(stats_buffer_depth);
+                Serial.println(F(")"));
             }
         }
 
         // Tail of hop: Jammer scan
         scan_jammer();
+    }
+
+    // Non-blocking LCD refresh every 200 ms
+    if (millis() - last_lcd_update_ms >= 200) {
+        last_lcd_update_ms = millis();
+        update_lcd();
     }
 }

@@ -1,15 +1,15 @@
 # MedRelay (HopperNet)
 
-**Jammer-Resilient FHSS Wireless Mesh with Edge Buffering & Cloud Sync**
+**Jammer-Resilient FHSS Wireless Mesh with Edge Buffering, On-Device Displays & Cloud Sync**
 
-[![Microcontrollers](https://img.shields.io/badge/Platform-ESP32-blue.svg)](https://espressif.com/)
+[![Microcontrollers](https://img.shields.io/badge/Platform-ESP32%20%7C%20Due%20%7C%20Mega-blue.svg)]()
 [![Radio](https://img.shields.io/badge/Transceiver-nRF24L01%2B-green.svg)](https://www.nordicsemi.com/)
 [![Cloud](https://img.shields.io/badge/Backend-Supabase-emerald.svg)](https://supabase.com/)
-[![Architecture](https://img.shields.io/badge/Topology-Store%20%26%20Forward%20Mesh-orange.svg)]()
+[![Displays](https://img.shields.io/badge/Displays-16x2%20LCD%20%7C%203.5%22%20Touch-purple.svg)]()
 
 MedRelay is an embedded wireless communication system built to maintain mission-critical data flow in RF-hostile and contested environments (e.g. hospitals, disaster zones, industrial plants). 
 
-When interference or an active RF jammer corrupts specific frequency channels, the mesh detects the carrier energy, dynamically blacklists the channel in synchronized lockstep, and hops across 124 clean channels. If the destination node becomes unreachable, the relay node buffers packets in RAM and persistent flash (SPIFFS), delivering them with zero loss once connectivity is restored.
+When interference or an active RF jammer corrupts specific frequency channels, the mesh detects the carrier energy, dynamically blacklists the channel in synchronized lockstep, and hops across 124 clean channels. If the destination node becomes unreachable, the relay node buffers packets in its 96 KB SRAM memory, delivering them with zero loss once connectivity is restored.
 
 ---
 
@@ -22,131 +22,60 @@ When interference or an active RF jammer corrupts specific frequency channels, t
                   └──────────────────────┬───────────────────────┘
                                          │ WiFi (2.4 GHz)
           ┌──────────────────────────────┼──────────────────────────────┐
-          │                              │                              │
-   ┌──────▼──────┐               ┌───────▼──────┐               ┌───────▼──────┐
+          │                                                             │
+   ┌──────▼──────┐               ┌──────────────┐               ┌───────▼──────┐
    │   Node A    │  SYNC/DATA/ACK│    Node B    │   DATA / ACK  │    Node C    │
-   │ ESP32 DevKit│◄─────────────►│ ESP32 DevKit │──────────────►│ ESP32 DevKit │
-   │ Source Node │               │ Master Relay │               │ Destination  │
+   │ ESP32 DevKit│◄─────────────►│ Arduino Due  │──────────────►│ ESP32 DevKit │
+   │ Source Node │               │ Relay & LCD  │               │ Destination  │
    └─────────────┘               └───────┬──────┘               └──────────────┘
                                          ▲
                                          │ Active RF Jamming
                                  ┌───────┴──────┐
                                  │    Jammer    │
-                                 │ ESP32 DevKit │
+                                 │ Arduino Mega │
+                                 │  Touchscreen │
                                  └──────────────┘
 ```
 
 ---
 
-## 2. Key Features
+## 2. Hardware Bill of Materials & Display Allocation
 
-1. **Deterministic FHSS Hopping Engine**: 124 RF channels (2.402–2.525 GHz) with a synchronized 25 ms dwell time driven by Node B's master microsecond clock.
-2. **Dynamic Channel Blacklisting**: Real-time nRF24 Received Power Detector (RPD) scans detect jammer carriers during quiet slots and broadcast blacklist bitmaps in SYNC frames.
-3. **Zero-Loss Persistent Edge Buffering**: Node B buffers undelivered packets across in-memory circular queues and SPIFFS flash memory, only clearing packets upon receiving positive downstream ACKs.
-4. **Dual-Core FreeRTOS Multitasking**:
-   - **Core 1**: Real-time microsecond-level SPI transactions and radio timing.
-   - **Core 0**: Asynchronous WiFi management, HTTP REST polling, and telemetry streaming.
-5. **Interactive Cloud Dashboard**: Real-time 124-channel spectrum grid, live node telemetry, edge buffer depth monitoring, and emergency alert dispatcher backed by Supabase WebSockets.
-
----
-
-## 3. Hardware Bill of Materials
-
-| Device | Microcontroller | Radio Module | Role |
-| :--- | :--- | :--- | :--- |
-| **Node A** | ESP32 DevKit (38-pin) | nRF24L01+ | Source — Dispatches user messages & vitals |
-| **Node B** | ESP32 DevKit (38-pin) | nRF24L01+ | Master Relay — FHSS clock, SPIFFS buffer, jammer detector |
-| **Node C** | ESP32 DevKit (38-pin) | nRF24L01+ | Destination — Receives messages, syncs to Supabase |
-| **Jammer** | ESP32 DevKit (38-pin) | nRF24L01+ (PA/LNA) | RF Jammer — Multi-mode interference generator |
-| **Power** | 4× 10 µF Electrolytic Capacitors | — | Placed across VCC/GND at each radio header |
-
-### SPI Pinout (Nodes A, B, C)
-- `VCC`: **3.3V** (Never connect to 5V!)
-- `GND`: **GND**
-- `CE`: **GPIO 4**
-- `CSN`: **GPIO 5**
-- `SCK`: **GPIO 18**
-- `MOSI`: **GPIO 23**
-- `MISO`: **GPIO 19**
-
-*(Jammer uses `CE: GPIO 25` and `CSN: GPIO 26`)*
+| Device | Microcontroller | Radio Module | Display / UI | Role |
+| :--- | :--- | :--- | :--- | :--- |
+| **Node A** | ESP32 DevKit | nRF24L01+ | WiFi + Cloud | Source — Dispatches user messages & vitals |
+| **Node B** | Arduino Due (84MHz ARM) | nRF24L01+ | 16×2 I2C LCD | Master Relay — FHSS clock, 96KB buffer, jammer detector |
+| **Node C** | ESP32 DevKit | nRF24L01+ | WiFi + Cloud | Destination — Receives messages, syncs to Supabase |
+| **Jammer** | Arduino Mega 2560 | nRF24L01+ (PA/LNA) | 3.5" Touchscreen | RF Jammer — Multi-mode adversary console |
+| **Power** | 4× 10 µF Electrolytic Capacitors | — | — | Placed across VCC/GND at each radio header |
 
 ---
 
-## 4. Quick Start & Flash Guide
+## 3. Quick Start & Flash Guide
 
-### 1. Build & Upload Firmware
 ```powershell
-# Flash Node A (Source)
+# Flash Node A (ESP32 Source)
 arduino-cli compile --fqbn esp32:esp32:esp32 --library firmware/libraries/fhss firmware/node_a
 arduino-cli upload -p <PORT_A> --fqbn esp32:esp32:esp32 firmware/node_a
 
-# Flash Node B (Relay & Master Clock)
-arduino-cli compile --fqbn esp32:esp32:esp32 --library firmware/libraries/fhss firmware/node_b
-arduino-cli upload -p <PORT_B> --fqbn esp32:esp32:esp32 firmware/node_b
+# Flash Node B (Arduino Due Relay + 16x2 LCD)
+arduino-cli compile --fqbn arduino:sam:arduino_due_x_dbg --library firmware/libraries/fhss firmware/node_b
+arduino-cli upload -p <PORT_B> --fqbn arduino:sam:arduino_due_x_dbg firmware/node_b
 
-# Flash Node C (Destination)
+# Flash Node C (ESP32 Destination)
 arduino-cli compile --fqbn esp32:esp32:esp32 --library firmware/libraries/fhss firmware/node_c
 arduino-cli upload -p <PORT_C> --fqbn esp32:esp32:esp32 firmware/node_c
 
-# Flash Jammer (Interference Generator)
-arduino-cli compile --fqbn esp32:esp32:esp32 --library firmware/libraries/fhss firmware/jammer
-arduino-cli upload -p <PORT_JAMMER> --fqbn esp32:esp32:esp32 firmware/jammer
+# Flash Jammer (Arduino Mega Adversary Console)
+arduino-cli compile --fqbn arduino:avr:mega --library firmware/libraries/fhss firmware/jammer
+arduino-cli upload -p <PORT_JAMMER> --fqbn arduino:avr:mega firmware/jammer
 ```
-
-### 2. Launch Web Dashboard
-Open [`dashboard/index.html`](file:///e:/repos/hoppernet/dashboard/index.html) in any modern browser (desktop or mobile). The dashboard immediately connects to the Supabase cloud backend to stream live spectrum data and node telemetry.
 
 ---
 
-## 5. Live Demonstration Procedures
+## 4. Live Demonstration Highlights
 
-### Demo 1: Normal Mesh Operation & Message Dispatch
-1. Open the dashboard on your phone.
-2. Select a preset (e.g. **🚨 Code Blue: RM 302**) and click **DISPATCH**.
-3. Observe the full journey: Phone ➔ Supabase ➔ Node A (WiFi) ➔ Node B (RF Hop) ➔ Node C (RF Hop) ➔ Supabase ➔ Delivered Feed on Dashboard.
-
-### Demo 2: Store-and-Forward Buffer (Unplug Node C)
-1. Unplug the USB cable from **Node C**.
-2. Dispatch 3 messages from the dashboard.
-3. Observe **Node B's buffer gauge** rising to `3 pkts` (held safely in flash).
-4. Plug **Node C** back in.
-5. Within seconds, Node B drains the entire buffer to Node C. All messages arrive with zero data loss.
-
-### Demo 3: Active RF Jamming & Dynamic Blacklisting
-1. Open the serial console for the Jammer ESP32 (115200 baud).
-2. Type `c 52` then `j` to blast interference on Channel 52.
-3. Observe **Node B**: Carrier scans detect the jammer and mark Channel 52 blacklisted.
-4. Observe **Dashboard**: Channel 52 immediately lights up in **red** on the 124-channel spectrum heatmap.
-5. The mesh continues hopping seamlessly on clean channels with zero packet drops.
-
----
-
-## 6. Repository Layout
-
-```
-hoppernet/
-├── firmware/
-│   ├── libraries/
-│   │   └── fhss/src/
-│   │       ├── fhss.h             # Core FHSS protocol engine & PRNG
-│   │       └── fhss_config.h      # WiFi, Supabase keys & pinouts
-│   ├── node_a/node_a.ino          # ESP32 Source node
-│   ├── node_b/node_b.ino          # ESP32 Master relay & SPIFFS edge buffer
-│   ├── node_c/node_c.ino          # ESP32 Destination sink node
-│   └── jammer/jammer.ino          # ESP32 Multi-mode RF jammer
-├── dashboard/
-│   ├── index.html                 # Live web dashboard interface
-│   ├── style.css                  # Responsive dark-theme styling
-│   └── app.js                     # Real-time Supabase Realtime client
-├── docs/
-│   ├── architecture.md            # System topology & layer breakdown
-│   ├── protocol.md                # 25ms dwell slot & frame specifications
-│   └── wiring.md                  # Detailed pinouts & power decoupling
-├── tools/
-│   └── serial_logger.py           # Multi-port serial capture utility
-├── .env.example                   # Configuration template
-├── .gitignore
-├── AGENTS.md                      # Engineering runbook & developer guide
-└── README.md                      # Project overview
-```
+1. **Physical On-Device LCD Proof**: Node B's 16×2 LCD displays real-time hopping channel, hop counter, store-and-forward buffer depth (`BUF: 3 pk`), and blacklisted channel counts (`JAM: 1`).
+2. **Touchscreen Cyber-Warfare Console**: Judges can tap on the Jammer's 3.5" touchscreen to launch targeted or wideband sweeps.
+3. **Zero-Loss Store-and-Forward**: Unplugging Node C causes packets to queue in Node B's 96 KB SRAM buffer; reconnecting drains the queue with 100% packet delivery ratio.
+4. **Cloud & Phone Integration**: Real-time 124-channel spectrum heatmap and message dispatch from any phone browser via Supabase WebSockets.
