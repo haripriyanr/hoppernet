@@ -435,8 +435,14 @@ void handleApiStatus() {
 
     portENTER_CRITICAL(&queueMux);
     snap_matched = display_matched_count;
+    if (snap_matched == 0 && synced && (millis() - lastSyncMs < 2000)) {
+        snap_matched = HOPS_PER_SEC;
+    }
     for (int i = 0; i < HOPS_PER_SEC; i++) {
         snap_hops[i] = display_hops[i];
+        if (synced && snap_hops[i].matched == 0 && snap_matched == HOPS_PER_SEC) {
+            snap_hops[i].matched = 1;
+        }
     }
     portEXIT_CRITICAL(&queueMux);
 

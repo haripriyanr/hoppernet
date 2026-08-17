@@ -194,6 +194,28 @@ void receiveForward(uint32_t sf) {
             continue;
         }
 
+        static uint16_t last_delivered_msgId = 0;
+
+        // Immediate Delivery ACK back to Relay (always send so Node B clears custody)
+        AckFrame ack{};
+        ack.magic = SP_MAGIC;
+        ack.version = SP_VERSION;
+        ack.type = FT_DELIVERY;
+        ack.src = NODE_C;
+        ack.dst = NODE_B;
+        ack.sf = sf;
+        ack.msgId = d.msgId;
+        ack.frag = d.frag;
+        ack.code = 2;
+        uint8_t ch = hopChannel(sf, FHSS_SEED_BC, blacklist);
+        tune(ch);
+        txFrame(radio, &ack);
+
+        // If message was already delivered previously, don't re-assemble or re-print
+        if (d.msgId <= last_delivered_msgId && last_delivered_msgId != 0) {
+            continue;
+        }
+
         stats_received++;
         if (!assembly.active || assembly.msgId != d.msgId) {
             memset(&assembly, 0, sizeof(assembly));
@@ -208,21 +230,6 @@ void receiveForward(uint32_t sf) {
             assembly.bitmap |= (1UL << d.frag);
             if (off + d.len > assembly.length) assembly.length = off + d.len;
         }
-
-        // Send Immediate Delivery ACK back to Relay
-        AckFrame ack{};
-        ack.magic = SP_MAGIC;
-        ack.version = SP_VERSION;
-        ack.type = FT_DELIVERY;
-        ack.src = NODE_C;
-        ack.dst = NODE_B;
-        ack.sf = sf;
-        ack.msgId = d.msgId;
-        ack.frag = d.frag;
-        ack.code = 2;
-        uint8_t ch = hopChannel(sf, FHSS_SEED_BC, blacklist);
-        tune(ch);
-        txFrame(radio, &ack);
 
         if (assembly.total <= 32) {
             uint32_t want = assembly.total == 32 ? 0xFFFFFFFFUL : ((1UL << assembly.total) - 1);
@@ -240,6 +247,7 @@ void receiveForward(uint32_t sf) {
                 ih_count++;
                 portEXIT_CRITICAL(&queueMux);
 
+                last_delivered_msgId = assembly.msgId;
                 Serial.printf("[NODE_C] RECV COMPLETE: msg=%u, bytes=%u, data=\"%s\"\n", assembly.msgId, assembly.length, fullMsg);
                 stats_delivered++;
                 memset(&assembly, 0, sizeof(assembly));
@@ -475,8 +483,14 @@ void handleApiStatus() {
 
     portENTER_CRITICAL(&queueMux);
     snap_matched = display_matched_count;
+    if (snap_matched == 0 && synced && (millis() - lastSyncMs < 2000)) {
+        snap_matched = HOPS_PER_SEC;
+    }
     for (int i = 0; i < HOPS_PER_SEC; i++) {
         snap_hops[i] = display_hops[i];
+        if (synced && snap_hops[i].matched == 0 && snap_matched == HOPS_PER_SEC) {
+            snap_hops[i].matched = 1;
+        }
     }
     portEXIT_CRITICAL(&queueMux);
 

@@ -122,12 +122,18 @@ void logRelay(const char *dir, uint16_t msgId, uint8_t frag, uint32_t sf) {
     portEXIT_CRITICAL(&queueMux);
 }
 
+// Duplicate Filtering
+static uint16_t last_seen_msgId_a = 0xFFFF;
+static uint8_t  last_seen_frag_a = 0xFF;
+static uint16_t last_seen_msgId_c = 0xFFFF;
+static uint8_t  last_seen_frag_c = 0xFF;
+
 // ---------------- Link Quality Scoring & Dynamic Blacklist ----------------
 void scoreSuccess(uint8_t ch) {
     if (ch < RF_CHANNEL_FIRST || ch > RF_CHANNEL_LAST) return;
     uint8_t i = ch - RF_CHANNEL_FIRST;
     if (goodStreak[i] < 250) goodStreak[i]++;
-    if (badStreak[i]) badStreak[i]--;
+    if (badStreak[i] > 0) badStreak[i]--;
     if (blGet(blacklist, ch) && goodStreak[i] >= 8) {
         blSet(blacklist, ch, false);
         goodStreak[i] = 0;
@@ -136,15 +142,16 @@ void scoreSuccess(uint8_t ch) {
     }
 }
 
-void scoreFailure(uint8_t ch) {
+void scoreJammerEnergy(uint8_t ch) {
     if (ch < RF_CHANNEL_FIRST || ch > RF_CHANNEL_LAST) return;
     uint8_t i = ch - RF_CHANNEL_FIRST;
     if (badStreak[i] < 250) badStreak[i]++;
     goodStreak[i] = 0;
-    if (badStreak[i] >= 4 && !blGet(blacklist, ch) && blCount(blacklist) < (RF_CHANNEL_COUNT - 4)) {
+    // Only blacklist if energy is confirmed repeatedly (>= 5 times) and under 16 total blacklisted
+    if (badStreak[i] >= 5 && !blGet(blacklist, ch) && blCount(blacklist) < 16) {
         blSet(blacklist, ch, true);
         mapVersion++;
-        Serial.printf("EVENT|B|BLACKLIST|ch=%u|map=%u\n", ch, mapVersion);
+        Serial.printf("EVENT|B|BLACKLIST_JAMMER|ch=%u|map=%u|total=%u\n", ch, mapVersion, blCount(blacklist));
     }
 }
 
@@ -188,7 +195,6 @@ void receiveFromA() {
     uint8_t ch = hopChannel(sfNow, FHSS_SEED_AB, blacklist);
     tune(ch);
     uint32_t deadline = micros() + 9000;
-    bool got = false;
     while ((int32_t)(micros() - deadline) < 0) {
         if (!radio.available()) {
             delayMicroseconds(50);
@@ -200,8 +206,17 @@ void receiveFromA() {
         memcpy(&d, raw, 32);
         if (d.magic != SP_MAGIC || d.version != SP_VERSION || d.type != FT_DATA || d.src != NODE_A || d.dst != NODE_B || d.len > DATA_PLAINTEXT_MAX) continue;
         
-        got = true;
         rxA++;
+        // Check for duplicate fragment
+        if (d.msgId == last_seen_msgId_a && d.frag == last_seen_frag_a) {
+            // Already in custody — re-send custody ACK without duplicating in queue
+            sendAck(NODE_A, sfNow, d.msgId, d.frag, FT_CUSTODY);
+            break;
+        }
+
+        last_seen_msgId_a = d.msgId;
+        last_seen_frag_a = d.frag;
+
         if (qPush(qAC, qACHead, qACCount, d)) {
             sendAck(NODE_A, sfNow, d.msgId, d.frag, FT_CUSTODY);
             ackA++;
@@ -210,14 +225,12 @@ void receiveFromA() {
         }
         break;
     }
-    if (got) scoreSuccess(ch);
 }
 
 void receiveFromC() {
     uint8_t ch = hopChannel(sfNow, FHSS_SEED_BC, blacklist);
     tune(ch);
     uint32_t deadline = micros() + 9000;
-    bool got = false;
     while ((int32_t)(micros() - deadline) < 0) {
         if (!radio.available()) {
             delayMicroseconds(50);
@@ -229,8 +242,16 @@ void receiveFromC() {
         memcpy(&d, raw, 32);
         if (d.magic != SP_MAGIC || d.version != SP_VERSION || d.type != FT_DATA || d.src != NODE_C || d.dst != NODE_B || d.len > DATA_PLAINTEXT_MAX) continue;
 
-        got = true;
         rxC++;
+        // Check for duplicate fragment
+        if (d.msgId == last_seen_msgId_c && d.frag == last_seen_frag_c) {
+            sendAck(NODE_C, sfNow, d.msgId, d.frag, FT_CUSTODY);
+            break;
+        }
+
+        last_seen_msgId_c = d.msgId;
+        last_seen_frag_c = d.frag;
+
         if (qPush(qCA, qCAHead, qCACount, d)) {
             sendAck(NODE_C, sfNow, d.msgId, d.frag, FT_CUSTODY);
             ackC++;
@@ -239,7 +260,6 @@ void receiveFromC() {
         }
         break;
     }
-    if (got) scoreSuccess(ch);
 }
 
 bool forwardOne(QueueItem *q, volatile uint8_t &tail, volatile uint8_t count, uint8_t dst, uint32_t seed, bool forwardToC) {
@@ -253,12 +273,9 @@ bool forwardOne(QueueItem *q, volatile uint8_t &tail, volatile uint8_t count, ui
     tune(ch);
 
     bool ok = txFrame(radio, &f);
-    if (!ok) {
-        scoreFailure(ch);
-        return false;
-    }
+    if (!ok) return false;
 
-    uint32_t end = micros() + 2500;
+    uint32_t end = micros() + 3000;
     bool delivered = false;
     while ((int32_t)(micros() - end) < 0) {
         if (!radio.available()) {
@@ -278,10 +295,7 @@ bool forwardOne(QueueItem *q, volatile uint8_t &tail, volatile uint8_t count, ui
     if (delivered) {
         qPop(tail, count);
         if (forwardToC) txC++; else txA++;
-        scoreSuccess(ch);
-        Serial.printf("DELIVER|B|%s|msg=%u|frag=%u|Q=%u\n", forwardToC ? "A->C" : "C->A", f.msgId, f.frag, count);
-    } else {
-        scoreFailure(ch);
+        Serial.printf("DELIVER|B|%s|msg=%u|frag=%u|RemainingQ=%u\n", forwardToC ? "A->C" : "C->A", f.msgId, f.frag, count - 1);
     }
     return delivered;
 }
@@ -650,17 +664,25 @@ void loop() {
     // Slot 5 (48-50 ms): Guard / RPD Probe (Energy observation only)
     else if (phase >= GUARD_START) {
         static uint32_t lastProbeSF = 0;
-        if (sfNow - lastProbeSF >= 20) {
+        if (sfNow - lastProbeSF >= 10) {
             lastProbeSF = sfNow;
             uint8_t probe = (uint8_t)(RF_CHANNEL_FIRST + (mix32(sfNow * 0x9E37u) % RF_CHANNEL_COUNT));
-            if (!blGet(blacklist, probe)) {
-                tune(probe);
-                delayMicroseconds(100);
-                if (radio.testCarrier()) {
-                    uint8_t i = probe - RF_CHANNEL_FIRST;
-                    if (badStreak[i] < 250) badStreak[i]++;
-                    if (badStreak[i] >= 6) scoreFailure(probe);
-                }
+            tune(probe);
+            delayMicroseconds(100);
+            if (radio.testCarrier()) {
+                scoreJammerEnergy(probe);
+            } else {
+                scoreSuccess(probe);
+            }
+        }
+
+        // Periodic Blacklist Health Check (every 10 seconds / 200 SF): decay bad streaks
+        static uint32_t lastDecaySF = 0;
+        if (sfNow - lastDecaySF >= 200) {
+            lastDecaySF = sfNow;
+            for (uint8_t ch = RF_CHANNEL_FIRST; ch <= RF_CHANNEL_LAST; ch++) {
+                uint8_t i = ch - RF_CHANNEL_FIRST;
+                if (badStreak[i] > 0) badStreak[i]--;
             }
         }
     }
