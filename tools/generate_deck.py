@@ -231,6 +231,58 @@ def slide_problem(prs):
 
 
 # ==========================================================================
+# SLIDE 2.5 — WHY WE HOP
+# ==========================================================================
+def slide_why_we_hop(prs):
+    s = blank(prs)
+    bgfill(s, prs)
+    header(s,
+           "The Core Concept  |  Why Do We Hop?  |  In Simple Terms",
+           "Dodging Interference by Never Standing Still",
+           "How frequency hopping defeats jammers by constantly changing channels")
+
+    CW = Inches(3.6)
+    CH = Inches(4.5)
+    CT = Inches(1.75)
+    GAP = Inches(0.27)
+    cols = [Inches(0.7), Inches(0.7)+CW+GAP, Inches(0.7)+2*(CW+GAP)]
+
+    # Box 1: The Problem
+    rect(s, cols[0], CT, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, cols[0]+Inches(0.18), CT+Inches(0.15), CW-Inches(0.36), Inches(0.26),
+       "1. The Problem with Staying Still", 11, RED, bold=True)
+    hline(s, cols[0]+Inches(0.18), CT+Inches(0.45), CW-Inches(0.36), DIVIDER)
+    tb(s, cols[0]+Inches(0.18), CT+Inches(0.6), CW-Inches(0.36), Inches(2.0),
+       "Standard Wi-Fi and Bluetooth stay on a single radio channel to communicate.\n\n"
+       "Because they never move, an attacker (jammer) only has to blast loud "
+       "radio noise on that one specific channel to completely block the signal.\n\n"
+       "It's like trying to have a conversation while someone blows an air horn directly in your ear.",
+       9.5, GREY, wrap=True)
+
+    # Box 2: The Solution (Hopping)
+    rect(s, cols[1], CT, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, cols[1]+Inches(0.18), CT+Inches(0.15), CW-Inches(0.36), Inches(0.26),
+       "2. The Solution: Frequency Hopping", 11, CYAN, bold=True)
+    hline(s, cols[1]+Inches(0.18), CT+Inches(0.45), CW-Inches(0.36), DIVIDER)
+    tb(s, cols[1]+Inches(0.18), CT+Inches(0.6), CW-Inches(0.36), Inches(2.0),
+       "Instead of staying still, HopperNet changes its radio channel 40 times every second.\n\n"
+       "We \"hop\" across 124 different frequencies in a fast, random pattern.\n\n"
+       "Both the sender and receiver know the secret pattern, so they hop together in perfect sync.",
+       9.5, GREY, wrap=True)
+
+    # Box 3: The Result
+    rect(s, cols[2], CT, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, cols[2]+Inches(0.18), CT+Inches(0.15), CW-Inches(0.36), Inches(0.26),
+       "3. The Result: Jammer Resilience", 11, GREEN, bold=True)
+    hline(s, cols[2]+Inches(0.18), CT+Inches(0.45), CW-Inches(0.36), DIVIDER)
+    tb(s, cols[2]+Inches(0.18), CT+Inches(0.6), CW-Inches(0.36), Inches(2.0),
+       "If a jammer tries to block us, they might hit one of our channels.\n\n"
+       "But we only lose a tiny fraction of a second of data. Before the jammer can even figure out where we went, "
+       "we have already hopped to a new, clear channel.\n\n"
+       "It makes our network like a moving target in the dark—impossible for the jammer to hit.",
+       9.5, GREY, wrap=True)
+
+# ==========================================================================
 # SLIDE 3 — LITERATURE SURVEY (Criteria 2, 3 marks)
 # ==========================================================================
 def slide_literature(prs):
@@ -517,9 +569,177 @@ def slide_protocol(prs):
        "HopIdx (1B)  |  Flags (1B)  |  CRC-8 (1B)  |  Payload (24B)",
        10, CYAN, bold=True)
 
+# ==========================================================================
+# SLIDE 6.25 — DESYNC FIXES (Criteria 3, cont.)
+# ==========================================================================
+def slide_desync_fixes(prs):
+    s = blank(prs)
+    bgfill(s, prs)
+    header(s,
+           "Criteria 3  |  Protocol Architecture  |  3 Marks",
+           "Sync Recovery & Desync Resolutions",
+           "Three critical edge cases and the architectural fixes that guarantee lockstep stability")
+
+    rows, cols = 4, 3
+    tbl = s.shapes.add_table(rows, cols, Inches(0.7), Inches(1.8), Inches(11.93), Inches(4.55)).table
+
+    tbl.columns[0].width = Inches(3.0)
+    tbl.columns[1].width = Inches(4.5)
+    tbl.columns[2].width = Inches(4.43)
+
+    headers = ["Bug", "Why It Causes Desync", "Architectural Fix"]
+    for ci, h in enumerate(headers):
+        cell = tbl.cell(0, ci)
+        cell.fill.solid(); cell.fill.fore_color.rgb = RGBColor(0x30, 0x10, 0x70)
+        p = cell.text_frame.paragraphs[0]
+        p.text = h; p.font.bold = True
+        p.font.size = Pt(11); p.font.color.rgb = WHITE
+
+    data = [
+        ("1. SYNC only processed if radio.available() fires",
+         "If Node A is even 1 channel off due to accumulated drift, it misses ALL future SYNCs forever.",
+         "Add a periodic rendezvous: every 20th hop, Node B also broadcasts on a fixed backup channel."),
+        ("2. Hard clock jump on each SYNC",
+         "Jumping the clock abruptly causes phase jitter.",
+         "Use a weighted moving average:\noffset = 0.8 × old_offset + 0.2 × new_offset"),
+        ("3. Sync-loss timeout is 2.5 seconds",
+         "By 2.5s the drift is ~100 µs — too much to recover smoothly.",
+         "Shorten timeout to 500 ms and re-enter scan mode immediately."),
+    ]
+
+    alt = [RGBColor(0x22, 0x10, 0x50), RGBColor(0x1e, 0x0c, 0x48)]
+
+    for ri, row in enumerate(data, 1):
+        bg_c = alt[ri % 2]
+        for ci, val in enumerate(row):
+            cell = tbl.cell(ri, ci)
+            cell.fill.solid(); cell.fill.fore_color.rgb = bg_c
+            p = cell.text_frame.paragraphs[0]
+            p.text = val
+            p.font.size = Pt(10)
+            p.font.color.rgb = GREY if ci == 1 else WHITE
+            if ci == 0:
+                p.font.bold = True
+            if "offset = 0.8" in val or "fixed backup channel" in val or "500 ms" in val:
+                # Basic rich text formatting isn't easily done via raw strings here without complex run logic,
+                # but we can just leave it as normal text, or we can build runs if needed.
+                # Since we already assigned text to the paragraph, it's fine as plain text.
+                pass
+
+    tb(s, Inches(0.7), Inches(6.5), Inches(11.93), Inches(0.28),
+       "These resolutions ensure the mesh can recover from deep jamming events without requiring a full network reset.",
+       9.5, GREY, italic=True)
 
 # ==========================================================================
-# SLIDE 7 — IMPLEMENTATION: FIRMWARE & HARDWARE (Criteria 4, 3 marks)
+# SLIDE 6.5 — RF SPECTRUM (Criteria 3, cont.)
+# ==========================================================================
+def slide_rf_spectrum(prs):
+    s = blank(prs)
+    bgfill(s, prs)
+    header(s,
+           "Criteria 3  |  RF Spectrum & Modulation Details  |  3 Marks",
+           "RF Frequency Range, Bandwidth & Spectral Spread",
+           "Detailed look at 124-channel span, GFSK modulation, and 2.4 GHz spectrum utilization")
+
+    CW = Inches(5.8)
+    CH = Inches(2.35)
+    r1 = Inches(1.72)
+    r2 = r1 + CH + Inches(0.18)
+    c1 = Inches(0.7)
+    c2 = c1 + CW + Inches(0.23)
+
+    # 1. Frequency Range & Spectral Span
+    rect(s, c1, r1, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, c1+Inches(0.18), r1+Inches(0.1), CW-Inches(0.36), Inches(0.24),
+       "1. Frequency Range & Spectral Span", 10.5, CYAN, bold=True)
+    hline(s, c1+Inches(0.18), r1+Inches(0.38), CW-Inches(0.36), DIVIDER)
+    
+    items1 = [
+        ("Formula", "f_RF = 2400 MHz + Channel Number"),
+        ("Lowest Frequency", "2402 MHz (2.402 GHz) -- clears the lower 2.4G guard band"),
+        ("Highest Frequency", "2525 MHz (2.525 GHz) -- spans the entire global ISM band"),
+        ("Total Bandwidth", "123 MHz hopping bandwidth spread across 124 distinct channels (1 MHz spacing)"),
+    ]
+    y = r1 + Inches(0.48)
+    for lbl, body in items1:
+        tb(s, c1+Inches(0.22), y, CW-Inches(0.44), Inches(0.2), f"- {lbl}:", 9, WHITE, bold=True)
+        y += Inches(0.2)
+        tb(s, c1+Inches(0.35), y, CW-Inches(0.57), Inches(0.35), body, 8.5, GREY)
+        y += Inches(0.4)
+
+    # 2. Channel Modulation
+    rect(s, c2, r1, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, c2+Inches(0.18), r1+Inches(0.1), CW-Inches(0.36), Inches(0.24),
+       "2. Channel Modulation & Occupied Bandwidth", 10.5, GREEN, bold=True)
+    hline(s, c2+Inches(0.18), r1+Inches(0.38), CW-Inches(0.36), DIVIDER)
+    
+    items2 = [
+        ("Air Data Rate", "250 kbps (configured for maximum receiver sensitivity: -94 dBm and extended range)"),
+        ("Modulation Type", "GFSK (Gaussian Frequency Shift Keying) -- constant-envelope, robust to amplitude distortion"),
+        ("Occupied BW", "~1 MHz perfectly matched to the 1 MHz channel step size"),
+        ("Channel Spacing", "1 MHz ensures zero co-channel interference between adjacent slots"),
+    ]
+    y = r1 + Inches(0.48)
+    for lbl, body in items2:
+        tb(s, c2+Inches(0.22), y, CW-Inches(0.44), Inches(0.2), f"- {lbl}:", 9, WHITE, bold=True)
+        y += Inches(0.2)
+        tb(s, c2+Inches(0.35), y, CW-Inches(0.57), Inches(0.35), body, 8.5, GREY)
+        y += Inches(0.4)
+
+    # 3. Timing & Hopping Dynamics
+    rect(s, c1, r2, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, c1+Inches(0.18), r2+Inches(0.1), CW-Inches(0.36), Inches(0.24),
+       "3. FHSS Timing & Hopping Dynamics", 10.5, AMBER, bold=True)
+    hline(s, c1+Inches(0.18), r2+Inches(0.38), CW-Inches(0.36), DIVIDER)
+    
+    items3 = [
+        ("Dwell Time (Td)", "25 ms -- time spent on a single frequency before hopping"),
+        ("Hopping Rate", "40 hops/second (1000 ms / 25 ms)"),
+        ("PRNG Algorithm", "32-bit XOR-Shift PRNG seeded with 0xC0FFEE01 (mathematically unpredictable)"),
+        ("Dynamic Blacklist", "Real-time 16-byte bitmask flags active Wi-Fi and jammers to skip in lockstep"),
+    ]
+    y = r2 + Inches(0.48)
+    for lbl, body in items3:
+        tb(s, c1+Inches(0.22), y, CW-Inches(0.44), Inches(0.2), f"- {lbl}:", 9, WHITE, bold=True)
+        y += Inches(0.2)
+        tb(s, c1+Inches(0.35), y, CW-Inches(0.57), Inches(0.35), body, 8.5, GREY)
+        y += Inches(0.4)
+
+    # 4. Spectrum Visualization
+    rect(s, c2, r2, CW, CH, CARD, DIVIDER, 0.6)
+    tb(s, c2+Inches(0.18), r2+Inches(0.1), CW-Inches(0.36), Inches(0.24),
+       "4. Spectrum Visualization", 10.5, ACCENT, bold=True)
+    hline(s, c2+Inches(0.18), r2+Inches(0.38), CW-Inches(0.36), DIVIDER)
+    
+    viz = (
+        "2.400 GHz              2.4835 GHz (Wi-Fi Band End)            2.525 GHz\n"
+        "   |                                |                                   |\n"
+        "   +--[CH 2: 2402 MHz] -------------+---------------------- [CH 125: 2525 MHz]\n"
+        "   |                                |\n"
+        "   v                                v\n"
+        "[Standard 2.4G Wi-Fi: CH 1,6,11]       [Upper Industrial Spectrum]\n"
+        "(Blacklisted when congested/jammed)    (Clean, high-throughput FHSS hops)"
+    )
+    
+    # Use Courier New for ASCII art
+    box = s.shapes.add_textbox(c2+Inches(0.22), r2+Inches(0.48), CW-Inches(0.44), Inches(1.1))
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = viz
+    run.font.size = Pt(8.5)
+    run.font.name = "Courier New"
+    run.font.color.rgb = CYAN
+
+    tb(s, c2+Inches(0.22), r2+Inches(1.5), CW-Inches(0.44), Inches(0.7), 
+       "Why this matters: Wi-Fi routers & Bluetooth operate exclusively between 2.400 and 2.4835 GHz. "
+       "HopperNet hops all the way up to 2.525 GHz (Channels 84-125), communicating even when the commercial Wi-Fi band is congested or jammed.",
+       8.5, GREY, italic=True)
+
+
+
 # ==========================================================================
 def slide_firmware(prs):
     s = blank(prs)
@@ -912,10 +1132,13 @@ def build():
     prs = new_prs()
     slide_title(prs)
     slide_problem(prs)
+    slide_why_we_hop(prs)
     slide_literature(prs)
     slide_gap(prs)
     slide_arch(prs)
     slide_protocol(prs)
+    slide_desync_fixes(prs)
+    slide_rf_spectrum(prs)
     slide_firmware(prs)
     slide_cloud(prs)
     slide_validation(prs)

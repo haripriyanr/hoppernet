@@ -37,12 +37,15 @@ static const uint8_t FHSS_PIPE_ADDR[5] = {0x48, 0x4F, 0x50, 0x50, 0x31}; // "HOP
 struct fhss_telemetry {
     uint32_t sent;
     uint32_t acked;
-    uint32_t received;
+    uint32_t lost;
+    float    pdr;
+    int8_t   rssi_dbm;
     uint16_t buffer_depth;
     uint8_t  blacklist_count;
     uint8_t  current_channel;
     uint32_t current_hop;
     uint8_t  synced;
+    uint8_t  channel_quality; // 0-100%
 };
 
 struct fhss_frame {
