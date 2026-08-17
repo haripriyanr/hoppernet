@@ -377,19 +377,19 @@ void setup() {
         channel_scores[i] = 100;
     }
 
-    // 1. SoftAP Setup (Maximum RF Power + No Sleep)
+    // 1. SoftAP Setup (50% Power — Cool & Efficient)
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(false);
-    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    WiFi.setTxPower(WIFI_POWER_11dBm); // 50% Power (~12.5mW) — cool running
     IPAddress local_IP(192, 168, 4, 1);
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
     WiFi.softAP(NODE_C_SSID, WIFI_PASS_COMMON, 11, 0, 4);
 
-    Serial.print(F("[WIFI] Access Point (MAX POWER): "));
+    Serial.print(F("[WIFI] Access Point (50% POWER): "));
     Serial.println(NODE_C_SSID);
     Serial.println(F("[WIFI] Web Portal: http://192.168.4.1"));
 
@@ -450,7 +450,6 @@ void loop() {
 
                 int32_t measured_offset = (int32_t)rx_master_ts - (int32_t)micros();
 
-                // Enhancement: Dual-State PI Loop Filter (Phase + Frequency Tracking)
                 if (!synced) {
                     clock_offset = measured_offset;
                     synced = 1;
@@ -472,6 +471,7 @@ void loop() {
 
             } else if (f.type == FRAME_TYPE_ACK && f.src == RELAY && f.dst == ROLE) {
                 stats_acked++;
+                seq_counter_c++;
                 out_pop(); // Return message delivered!
                 
                 if (stats_sent > 0) {
@@ -524,13 +524,13 @@ void loop() {
         }
     }
 
-    // 3. Autonomous Flywheel Watchdog (Lee et al. 2026 Hybrid Coarse/Fine Architecture)
+    // 3. Autonomous Flywheel Watchdog
     if (synced && (millis() - last_sync_time_ms > 5000)) {
         synced = 0;
         Serial.println(F("[NODE_C] ⚠️ Flywheel Expired (>5000ms no beacon) — Entering Fast PMER Anchor Acquisition..."));
     }
 
-    // Stage 1: Near-Zero Waiting Coarse Acquisition (PMER Anchor Set {10, 42, 74, 106})
+    // Stage 1: Fast PMER Anchor Acquisition
     static uint8_t anchor_scan_idx_c = 0;
     static uint32_t last_scan_switch_ms = 0;
     if (!synced) {
@@ -542,7 +542,7 @@ void loop() {
         return;
     }
 
-    // Stage 2: Fine Tracking & Autonomous Slotted Flywheel Execution
+    // Stage 2: Fine Tracking & Autonomous Slotted Execution
     uint32_t now_master = (uint32_t)((int32_t)micros() + clock_offset);
     uint32_t hop = now_master / DWELL_US;
     uint32_t phase = now_master % DWELL_US;
@@ -550,56 +550,59 @@ void loop() {
 
     set_current_channel(hop);
 
-    // 4. Reverse Transmit Window: [13.5ms, 18.5ms) with ARQ Retransmission
+    // 4. Reverse Transmit Window: [13.5ms, 18.5ms) with robust ARQ Retransmission
     static uint32_t last_tx_hop_c = 0xFFFFFFFF;
     if (phase >= 13500 && phase < 18500 && hop != last_tx_hop_c) {
         last_tx_hop_c = hop;
 
         OutboundMsg outMsg;
         if (out_peek(&outMsg)) {
-            if (outMsg.sent_at_hop > 0 && (hop - outMsg.sent_at_hop > 3)) {
+            bool do_transmit = false;
+            if (outMsg.sent_at_hop == 0) {
+                out_queue_c[oqc_tail].sent_at_hop = hop;
+                do_transmit = true;
+            } else if (hop - outMsg.sent_at_hop >= 4) { // Retry after 4 hops (100ms)
                 out_queue_c[oqc_tail].retries++;
-                if (out_queue_c[oqc_tail].retries >= 3) {
+                if (out_queue_c[oqc_tail].retries >= 5) {
                     stats_lost++;
-                    int ch_idx = stats_current_ch - CHANNEL_BASE;
-                    if (ch_idx >= 0 && ch_idx < NUM_CHANNELS && channel_scores[ch_idx] >= 20) {
-                        channel_scores[ch_idx] -= 20;
-                    }
                     if (stats_sent > 0) {
                         stats_pdr = ((float)stats_acked / (float)stats_sent) * 100.0f;
                     }
+                    seq_counter_c++;
                     out_pop();
                     return;
                 }
+                out_queue_c[oqc_tail].sent_at_hop = hop;
+                do_transmit = true;
             }
 
-            out_queue_c[oqc_tail].sent_at_hop = hop;
+            if (do_transmit) {
+                struct fhss_frame tx;
+                memset(&tx, 0, sizeof(tx));
+                tx.magic = FHSS_MAGIC;
+                tx.type = FRAME_TYPE_DATA;
+                tx.src = ROLE;
+                tx.dst = RELAY;
+                tx.seq = seq_counter_c;
+                tx.hop_index = (uint8_t)(hop & 0xFF);
+                tx.flags = FLAG_ACK_REQ;
+                tx.payload[0] = outMsg.len;
+                memcpy(&tx.payload[1], outMsg.text, outMsg.len);
+                frame_fill_crc(&tx, PAYLOAD_LEN);
 
-            struct fhss_frame tx;
-            memset(&tx, 0, sizeof(tx));
-            tx.magic = FHSS_MAGIC;
-            tx.type = FRAME_TYPE_DATA;
-            tx.src = ROLE;
-            tx.dst = RELAY;
-            tx.seq = seq_counter_c;
-            tx.hop_index = (uint8_t)(hop & 0xFF);
-            tx.flags = FLAG_ACK_REQ;
-            tx.payload[0] = outMsg.len;
-            memcpy(&tx.payload[1], outMsg.text, outMsg.len);
-            frame_fill_crc(&tx, PAYLOAD_LEN);
+                radio.stopListening();
+                radio.write(&tx, MAX_FRAME_LEN);
+                stats_sent++;
+                radio.startListening();
 
-            radio.stopListening();
-            radio.write(&tx, MAX_FRAME_LEN);
-            stats_sent++;
-            radio.startListening();
-
-            Serial.print(F("[NODE_C] TX RETURN hop="));
-            Serial.print(hop);
-            Serial.print(F(" seq="));
-            Serial.print(seq_counter_c);
-            Serial.print(F(" text=\""));
-            Serial.print(outMsg.text);
-            Serial.println(F("\""));
+                Serial.print(F("[NODE_C] TX RETURN hop="));
+                Serial.print(hop);
+                Serial.print(F(" seq="));
+                Serial.print(seq_counter_c);
+                Serial.print(F(" text=\""));
+                Serial.print(outMsg.text);
+                Serial.println(F("\""));
+            }
         }
     }
 }

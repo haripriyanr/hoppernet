@@ -168,6 +168,13 @@ static inline void set_current_channel(uint32_t hop) {
     }
 }
 
+bool is_anchor_channel(uint8_t ch) {
+    for (int i = 0; i < NUM_ANCHOR_CHANNELS; i++) {
+        if (ANCHOR_CHANNELS[i] == ch) return true;
+    }
+    return false;
+}
+
 void broadcast_sync(uint32_t hop, uint32_t master_ts) {
     struct fhss_frame f;
     memset(&f, 0, sizeof(f));
@@ -184,21 +191,20 @@ void broadcast_sync(uint32_t hop, uint32_t master_ts) {
     frame_fill_crc(&f, PAYLOAD_LEN);
 
     radio.stopListening();
-    // 1. Broadcast on current pseudo-random hop channel
-    radio.write(&f, MAX_FRAME_LEN);
-
-    // 2. Multi-Tier PMER: Every 4th hop, also blast sync on an Anchor Channel for near-zero waiting rendezvous
-    if ((hop % 4) == 0) {
-        uint8_t anchor_ch = ANCHOR_CHANNELS[(hop / 4) % NUM_ANCHOR_CHANNELS];
+    // Multi-Tier PMER: Alternate between regular hop channel and anchor rendezvous channel
+    if ((hop % 8) == 0) {
+        uint8_t anchor_ch = ANCHOR_CHANNELS[(hop / 8) % NUM_ANCHOR_CHANNELS];
         radio.setChannel(anchor_ch);
         radio.write(&f, MAX_FRAME_LEN);
-        radio.setChannel(stats_current_ch); // Restore active hop channel
+        radio.setChannel(stats_current_ch);
+    } else {
+        radio.write(&f, MAX_FRAME_LEN);
     }
-
     radio.startListening();
 }
 
 static uint32_t blacklist_hop[NUM_CHANNELS] = {0}; // Hop index when channel was blacklisted
+#define MAX_BLACKLISTED_CHANNELS 30
 
 void scan_jammer() {
     bool carrier = radio.testCarrier();
@@ -222,11 +228,14 @@ void scan_jammer() {
             return;
         }
 
-        // 2. Detect Persistent Jamming (Require 8 consecutive carrier hits)
+        // Never blacklist PMER Anchor rendezvous channels
+        if (is_anchor_channel(ch)) return;
+
+        // 2. Detect Persistent Jamming (Require 12 distinct persistent carrier hits)
         if (carrier) {
             jam_counts[idx]++;
-            if (channel_scores[idx] >= 10) channel_scores[idx] -= 10;
-            if (jam_counts[idx] >= 8 && !blacklist_get(blacklist, ch)) {
+            if (channel_scores[idx] >= 5) channel_scores[idx] -= 5;
+            if (jam_counts[idx] >= 12 && !blacklist_get(blacklist, ch) && (stats_blacklist_count < MAX_BLACKLISTED_CHANNELS)) {
                 blacklist_set(blacklist, ch);
                 blacklist_hop[idx] = stats_current_hop;
                 stats_blacklist_count = blacklist_count(blacklist);
@@ -431,19 +440,19 @@ void setup() {
         channel_scores[i] = 100;
     }
 
-    // 1. SoftAP Setup (Maximum RF Power + No Sleep)
+    // 1. SoftAP Setup (50% Power — Cool & Efficient)
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(false);
-    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    WiFi.setTxPower(WIFI_POWER_11dBm); // 50% Power (~12.5mW) — cool running
     IPAddress local_IP(192, 168, 4, 1);
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
     WiFi.softAP(NODE_B_SSID, WIFI_PASS_COMMON, 6, 0, 4);
 
-    Serial.print(F("[WIFI] Access Point (MAX POWER): "));
+    Serial.print(F("[WIFI] Access Point (50% POWER): "));
     Serial.println(NODE_B_SSID);
     Serial.println(F("[WIFI] Web Portal: http://192.168.4.1"));
 
@@ -719,8 +728,10 @@ void loop() {
         }
     }
 
-    // 4. Jammer Carrier Scan Window [23.5ms, 25ms)
-    if (phase >= 23500) {
+    // 4. Jammer Carrier Scan Window [23.5ms, 25ms) — executed strictly ONCE per hop
+    static uint32_t last_scan_hop = 0xFFFFFFFF;
+    if (phase >= 23500 && hop != last_scan_hop) {
+        last_scan_hop = hop;
         scan_jammer();
     }
 }

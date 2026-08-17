@@ -379,19 +379,19 @@ void setup() {
         channel_scores[i] = 100;
     }
 
-    // 1. SoftAP Setup (Maximum RF Power + No Sleep)
+    // 1. SoftAP Setup (50% Power — Cool & Efficient)
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(false);
-    WiFi.setTxPower(WIFI_POWER_19_5dBm); // 100% Maximum RF Transmit Power (~90mW)
+    WiFi.setTxPower(WIFI_POWER_11dBm); // 50% Power (~12.5mW) — cool running & zero thermal throttling
     IPAddress local_IP(192, 168, 4, 1);
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
     WiFi.softAP(NODE_A_SSID, WIFI_PASS_COMMON, 1, 0, 4);
 
-    Serial.print(F("[WIFI] Access Point (MAX POWER): "));
+    Serial.print(F("[WIFI] Access Point (50% POWER): "));
     Serial.println(NODE_A_SSID);
     Serial.println(F("[WIFI] Web Portal: http://192.168.4.1"));
 
@@ -442,7 +442,6 @@ void loop() {
         struct fhss_frame f;
         radio.read(&f, MAX_FRAME_LEN);
         if (frame_valid(&f, PAYLOAD_LEN)) {
-            // Signal detected: estimate RSSI based on RPD / carrier
             bool rpd = radio.testRPD();
             stats_rssi_dbm = rpd ? -60 : -78;
 
@@ -453,7 +452,6 @@ void loop() {
 
                 int32_t measured_offset = (int32_t)rx_master_ts - (int32_t)micros();
 
-                // Enhancement: Dual-State PI Loop Filter (Phase + Frequency Tracking)
                 if (!synced) {
                     clock_offset = measured_offset;
                     synced = 1;
@@ -468,7 +466,6 @@ void loop() {
                 blacklist_copy(blacklist, rx_blacklist);
                 last_sync_time_ms = millis();
 
-                // Boost channel score on successful sync receipt
                 int ch_idx = stats_current_ch - CHANNEL_BASE;
                 if (ch_idx >= 0 && ch_idx < NUM_CHANNELS) {
                     if (channel_scores[ch_idx] < 100) channel_scores[ch_idx] += 2;
@@ -476,14 +473,13 @@ void loop() {
 
             } else if (f.type == FRAME_TYPE_ACK && f.src == RELAY && f.dst == ROLE) {
                 stats_acked++;
+                seq_counter++;
                 out_pop(); // Safe delivery acknowledged!
                 
-                // Recalculate Packet Delivery Ratio
                 if (stats_sent > 0) {
                     stats_pdr = ((float)stats_acked / (float)stats_sent) * 100.0f;
                 }
 
-                // Boost channel quality
                 int ch_idx = stats_current_ch - CHANNEL_BASE;
                 if (ch_idx >= 0 && ch_idx < NUM_CHANNELS) {
                     if (channel_scores[ch_idx] <= 95) channel_scores[ch_idx] += 5;
@@ -532,13 +528,13 @@ void loop() {
         }
     }
 
-    // 3. Autonomous Flywheel Watchdog (Lee et al. 2026 Hybrid Coarse/Fine Architecture)
+    // 3. Autonomous Flywheel Watchdog
     if (synced && (millis() - last_sync_time_ms > 5000)) {
         synced = 0;
         Serial.println(F("[NODE_A] ⚠️ Flywheel Expired (>5000ms no beacon) — Entering Fast PMER Anchor Acquisition..."));
     }
 
-    // Stage 1: Near-Zero Waiting Coarse Acquisition (PMER Anchor Set {10, 42, 74, 106})
+    // Stage 1: Fast PMER Anchor Acquisition
     static uint8_t anchor_scan_idx = 0;
     static uint32_t last_scan_switch_ms = 0;
     if (!synced) {
@@ -550,7 +546,7 @@ void loop() {
         return;
     }
 
-    // Stage 2: Fine Tracking & Autonomous Slotted Flywheel Execution
+    // Stage 2: Fine Tracking & Autonomous Slotted Execution
     uint32_t now_master = (uint32_t)((int32_t)micros() + clock_offset);
     uint32_t hop = now_master / DWELL_US;
     uint32_t phase = now_master % DWELL_US;
@@ -558,65 +554,65 @@ void loop() {
 
     set_current_channel(hop);
 
-    // 4. Forward Transmit Window: [2.5ms, 7.5ms) with ARQ Retransmission
+    // 4. Forward Transmit Window: [2.5ms, 7.5ms) with robust ARQ Retransmission
     static uint32_t last_tx_hop = 0xFFFFFFFF;
     if (phase >= 2500 && phase < 7500 && hop != last_tx_hop) {
         last_tx_hop = hop;
 
         OutboundMsg outMsg;
         if (out_peek(&outMsg)) {
-            // Check if previous attempt timed out (unacked for > 3 hops)
-            if (outMsg.sent_at_hop > 0 && (hop - outMsg.sent_at_hop > 3)) {
+            bool do_transmit = false;
+            if (outMsg.sent_at_hop == 0) {
+                // First time transmitting
+                out_queue[oq_tail].sent_at_hop = hop;
+                do_transmit = true;
+            } else if (hop - outMsg.sent_at_hop >= 4) { // Retry after 4 hops (100ms)
                 out_queue[oq_tail].retries++;
-                if (out_queue[oq_tail].retries >= 3) {
-                    // Declare packet lost after 3 failed retry hops
+                if (out_queue[oq_tail].retries >= 5) {
                     stats_lost++;
-                    int ch_idx = stats_current_ch - CHANNEL_BASE;
-                    if (ch_idx >= 0 && ch_idx < NUM_CHANNELS && channel_scores[ch_idx] >= 20) {
-                        channel_scores[ch_idx] -= 20; // Penalize channel quality
-                    }
                     if (stats_sent > 0) {
                         stats_pdr = ((float)stats_acked / (float)stats_sent) * 100.0f;
                     }
-                    Serial.print(F("[NODE_A] PKT TIMEOUT/LOSS seq="));
+                    Serial.print(F("[NODE_A] ❌ PKT TIMEOUT/LOSS seq="));
                     Serial.print(seq_counter);
-                    Serial.print(F(" | PDR: "));
-                    Serial.print(stats_pdr, 1);
-                    Serial.println(F("%"));
+                    Serial.println(F(" (Giving up after 5 retries)"));
+                    seq_counter++;
                     out_pop();
                     return;
                 }
+                out_queue[oq_tail].sent_at_hop = hop;
+                do_transmit = true;
             }
 
-            out_queue[oq_tail].sent_at_hop = hop;
+            if (do_transmit) {
+                struct fhss_frame tx;
+                memset(&tx, 0, sizeof(tx));
+                tx.magic = FHSS_MAGIC;
+                tx.type = FRAME_TYPE_DATA;
+                tx.src = ROLE;
+                tx.dst = RELAY;
+                tx.seq = seq_counter;
+                tx.hop_index = (uint8_t)(hop & 0xFF);
+                tx.flags = FLAG_ACK_REQ;
+                tx.payload[0] = outMsg.len;
+                memcpy(&tx.payload[1], outMsg.text, outMsg.len);
+                frame_fill_crc(&tx, PAYLOAD_LEN);
 
-            struct fhss_frame tx;
-            memset(&tx, 0, sizeof(tx));
-            tx.magic = FHSS_MAGIC;
-            tx.type = FRAME_TYPE_DATA;
-            tx.src = ROLE;
-            tx.dst = RELAY;
-            tx.seq = seq_counter;
-            tx.hop_index = (uint8_t)(hop & 0xFF);
-            tx.flags = FLAG_ACK_REQ;
-            tx.payload[0] = outMsg.len;
-            memcpy(&tx.payload[1], outMsg.text, outMsg.len);
-            frame_fill_crc(&tx, PAYLOAD_LEN);
+                radio.stopListening();
+                radio.write(&tx, MAX_FRAME_LEN);
+                stats_sent++;
+                radio.startListening();
 
-            radio.stopListening();
-            radio.write(&tx, MAX_FRAME_LEN);
-            stats_sent++;
-            radio.startListening();
-
-            Serial.print(F("[NODE_A] TX FORWARD hop="));
-            Serial.print(hop);
-            Serial.print(F(" seq="));
-            Serial.print(seq_counter);
-            Serial.print(F(" retry="));
-            Serial.print(outMsg.retries);
-            Serial.print(F(" text=\""));
-            Serial.print(outMsg.text);
-            Serial.println(F("\""));
+                Serial.print(F("[NODE_A] TX FORWARD hop="));
+                Serial.print(hop);
+                Serial.print(F(" seq="));
+                Serial.print(seq_counter);
+                Serial.print(F(" retry="));
+                Serial.print(out_queue[oq_tail].retries);
+                Serial.print(F(" text=\""));
+                Serial.print(outMsg.text);
+                Serial.println(F("\""));
+            }
         }
     }
 }
