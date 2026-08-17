@@ -440,19 +440,19 @@ void setup() {
         channel_scores[i] = 100;
     }
 
-    // 1. SoftAP Setup (60% Power — Cool, Efficient & Strong Range)
+    // 1. SoftAP Setup (75% Power — Balanced Range & Low Thermal Impact)
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(false);
-    WiFi.setTxPower(WIFI_POWER_13dBm); // 60% Power (~20mW) — low thermal footprint & solid range
+    WiFi.setTxPower(WIFI_POWER_15dBm); // 75% Power (~31.6mW) — strong multi-room coverage & safe thermals
     IPAddress local_IP(192, 168, 4, 1);
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
     WiFi.softAP(NODE_B_SSID, WIFI_PASS_COMMON, 6, 0, 4);
 
-    Serial.print(F("[WIFI] Access Point (60% POWER): "));
+    Serial.print(F("[WIFI] Access Point (75% POWER): "));
     Serial.println(NODE_B_SSID);
     Serial.println(F("[WIFI] Web Portal: http://192.168.4.1"));
 
