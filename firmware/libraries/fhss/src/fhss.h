@@ -26,6 +26,9 @@ static const uint8_t FHSS_PIPE_ADDR[5] = {0x48, 0x4F, 0x50, 0x50, 0x31}; // "HOP
 #define PHASE_REV_US      24000UL   // [13ms, 24ms): Reverse Path (C -> B -> A)
 #define SYNC_PERIOD_HOPS  20
 
+#define NUM_ANCHOR_CHANNELS 4
+static const uint8_t ANCHOR_CHANNELS[NUM_ANCHOR_CHANNELS] = {10, 42, 74, 106};
+
 #define HEADER_LEN        8
 #define PAYLOAD_LEN       24
 #define MAX_FRAME_LEN     (HEADER_LEN + PAYLOAD_LEN)

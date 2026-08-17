@@ -450,15 +450,16 @@ void loop() {
 
                 int32_t measured_offset = (int32_t)rx_master_ts - (int32_t)micros();
 
-                // Enhancement 1: Software PLL Filter (Smooth drift correction)
+                // Enhancement: Dual-State PI Loop Filter (Phase + Frequency Tracking)
                 if (!synced) {
                     clock_offset = measured_offset;
                     synced = 1;
                     set_current_channel(rx_hop_index + 1);
-                    Serial.print(F("[NODE_C] *** SYNC ACQUIRED (PLL Lock) *** Master Hop: "));
+                    Serial.print(F("[NODE_C] ⚡ *** INSTANT SYNC LOCK (PMER Anchor) *** Master Hop: "));
                     Serial.println(rx_hop_index);
                 } else {
-                    clock_offset = (int32_t)((0.85f * (float)clock_offset) + (0.15f * (float)measured_offset));
+                    float phase_err = (float)measured_offset - (float)clock_offset;
+                    clock_offset += (int32_t)(0.18f * phase_err);
                 }
 
                 blacklist_copy(blacklist, rx_blacklist);
@@ -524,20 +525,19 @@ void loop() {
     }
 
     // 3. Autonomous Flywheel Watchdog (Lee et al. 2026 Hybrid Coarse/Fine Architecture)
-    // Maintain autonomous mathematical hopping lock even under severe beacon loss.
-    // Only drop lock if NO beacon is received for over 5000ms (200 missed hops).
     if (synced && (millis() - last_sync_time_ms > 5000)) {
         synced = 0;
-        Serial.println(F("[NODE_C] ⚠️ Flywheel Expired (>5000ms no beacon) — Entering Coarse Serial Acquisition..."));
+        Serial.println(F("[NODE_C] ⚠️ Flywheel Expired (>5000ms no beacon) — Entering Fast PMER Anchor Acquisition..."));
     }
 
-    // Stage 1: Coarse Acquisition (Park-and-Listen on each channel for 80ms)
+    // Stage 1: Near-Zero Waiting Coarse Acquisition (PMER Anchor Set {10, 42, 74, 106})
+    static uint8_t anchor_scan_idx_c = 0;
     static uint32_t last_scan_switch_ms = 0;
     if (!synced) {
-        if (millis() - last_scan_switch_ms >= 80) {
+        if (millis() - last_scan_switch_ms >= 30) {
             last_scan_switch_ms = millis();
-            radio.setChannel(scan_ch);
-            scan_ch = (scan_ch + 1) % (CHANNEL_BASE + NUM_CHANNELS);
+            radio.setChannel(ANCHOR_CHANNELS[anchor_scan_idx_c]);
+            anchor_scan_idx_c = (anchor_scan_idx_c + 1) % NUM_ANCHOR_CHANNELS;
         }
         return;
     }

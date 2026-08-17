@@ -184,7 +184,17 @@ void broadcast_sync(uint32_t hop, uint32_t master_ts) {
     frame_fill_crc(&f, PAYLOAD_LEN);
 
     radio.stopListening();
+    // 1. Broadcast on current pseudo-random hop channel
     radio.write(&f, MAX_FRAME_LEN);
+
+    // 2. Multi-Tier PMER: Every 4th hop, also blast sync on an Anchor Channel for near-zero waiting rendezvous
+    if ((hop % 4) == 0) {
+        uint8_t anchor_ch = ANCHOR_CHANNELS[(hop / 4) % NUM_ANCHOR_CHANNELS];
+        radio.setChannel(anchor_ch);
+        radio.write(&f, MAX_FRAME_LEN);
+        radio.setChannel(stats_current_ch); // Restore active hop channel
+    }
+
     radio.startListening();
 }
 
