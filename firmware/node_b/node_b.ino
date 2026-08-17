@@ -230,9 +230,12 @@ void setup() {
     radio.setDataRate(RF24_250KBPS);
     radio.setPayloadSize(MAX_FRAME_LEN);
     radio.setAutoAck(false);
+    radio.setCRCLength(RF24_CRC_16);
+    radio.openWritingPipe(FHSS_PIPE_ADDR);
+    radio.openReadingPipe(1, FHSS_PIPE_ADDR);
     radio.startListening();
 
-    Serial.println(F("[NODE_B] Mesh ready. Starting bidirectional master clock..."));
+    Serial.println(F("[NODE_B] Mesh ready with pipe HOPP1. Starting master clock..."));
 }
 
 // ---------------- Loop ----------------

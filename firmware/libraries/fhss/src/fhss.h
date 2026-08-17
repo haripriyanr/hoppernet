@@ -10,6 +10,7 @@
 #define NODE_C            3
 
 #define FHSS_SEED         0xC0FFEE01u
+static const uint8_t FHSS_PIPE_ADDR[5] = {0x48, 0x4F, 0x50, 0x50, 0x31}; // "HOPP1"
 
 #define FRAME_TYPE_SYNC       0x01
 #define FRAME_TYPE_DATA       0x02

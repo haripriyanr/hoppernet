@@ -138,11 +138,20 @@ void setup() {
     Serial.println(F("  HopperNet NODE A — Source (SSID: hoppera)"));
     Serial.println(F("=========================================="));
 
-    // Start SoftAP
+    // 1. Start SoftAP with explicit IP configuration
+    WiFi.disconnect(true);
+    delay(100);
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(NODE_A_SSID, WIFI_PASS_COMMON);
-    Serial.print(F("[WIFI] Access Point Started: "));
-    Serial.println(NODE_A_SSID);
+    IPAddress local_IP(192, 168, 4, 1);
+    IPAddress gateway(192, 168, 4, 1);
+    IPAddress subnet(255, 255, 255, 0);
+    WiFi.softAPConfig(local_IP, gateway, subnet);
+    bool ap_ok = WiFi.softAP(NODE_A_SSID, WIFI_PASS_COMMON, 1, 0, 4);
+
+    Serial.print(F("[WIFI] Access Point ("));
+    Serial.print(NODE_A_SSID);
+    Serial.print(F("): "));
+    Serial.println(ap_ok ? F("STARTED SUCCESSFULLY") : F("FAILED TO START"));
     Serial.print(F("[WIFI] Web Portal IP: http://"));
     Serial.println(WiFi.softAPIP());
 
@@ -155,18 +164,20 @@ void setup() {
     blacklist_clear_all(blacklist);
     blacklist_clear_all(rx_blacklist);
 
+    // 2. Initialize Radio
     if (!radio.begin()) {
-        Serial.println(F("[NODE_A] RF24 init FAILED — check wiring!"));
-        while (1) delay(100);
+        Serial.println(F("[NODE_A] WARNING: RF24 init FAILED — check nRF24 wiring!"));
+    } else {
+        radio.setPALevel(RF24_PA_LOW);
+        radio.setDataRate(RF24_250KBPS);
+        radio.setPayloadSize(MAX_FRAME_LEN);
+        radio.setAutoAck(false);
+        radio.setCRCLength(RF24_CRC_16);
+        radio.openWritingPipe(FHSS_PIPE_ADDR);
+        radio.openReadingPipe(1, FHSS_PIPE_ADDR);
+        radio.startListening();
+        Serial.println(F("[NODE_A] RF24 Initialized with pipe HOPP1. Scanning channels for SYNC..."));
     }
-
-    radio.setPALevel(RF24_PA_LOW);
-    radio.setDataRate(RF24_250KBPS);
-    radio.setPayloadSize(MAX_FRAME_LEN);
-    radio.setAutoAck(false);
-    radio.startListening();
-
-    Serial.println(F("[NODE_A] Scanning channels for SYNC beacon..."));
 }
 
 // ---------------- Loop ----------------
@@ -203,7 +214,8 @@ void loop() {
                 if (!synced) {
                     synced = 1;
                     set_current_channel(rx_hop_index + 1);
-                    Serial.println(F("[NODE_A] *** SYNC ACQUIRED ***"));
+                    Serial.print(F("[NODE_A] *** SYNC ACQUIRED *** Master Hop: "));
+                    Serial.println(rx_hop_index);
                 }
             } else if (f.type == FRAME_TYPE_ACK && f.src == RELAY && f.dst == ROLE) {
                 stats_acked++;
@@ -244,10 +256,14 @@ void loop() {
         }
     }
 
+    // If unsynced: Park on each channel for 80 ms to guarantee catching Node B's 25ms hops!
+    static uint32_t last_scan_switch_ms = 0;
     if (!synced) {
-        radio.setChannel(scan_ch);
-        scan_ch = (scan_ch + 1) % (CHANNEL_BASE + NUM_CHANNELS);
-        delay(2);
+        if (millis() - last_scan_switch_ms >= 80) {
+            last_scan_switch_ms = millis();
+            radio.setChannel(scan_ch);
+            scan_ch = (scan_ch + 1) % (CHANNEL_BASE + NUM_CHANNELS);
+        }
         return;
     }
 

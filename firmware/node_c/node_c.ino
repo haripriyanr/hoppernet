@@ -164,9 +164,12 @@ void setup() {
     radio.setDataRate(RF24_250KBPS);
     radio.setPayloadSize(MAX_FRAME_LEN);
     radio.setAutoAck(false);
+    radio.setCRCLength(RF24_CRC_16);
+    radio.openWritingPipe(FHSS_PIPE_ADDR);
+    radio.openReadingPipe(1, FHSS_PIPE_ADDR);
     radio.startListening();
 
-    Serial.println(F("[NODE_C] Scanning channels for SYNC beacon..."));
+    Serial.println(F("[NODE_C] RF24 Initialized with pipe HOPP1. Scanning channels for SYNC..."));
 }
 
 // ---------------- Loop ----------------
@@ -203,7 +206,8 @@ void loop() {
                 if (!synced) {
                     synced = 1;
                     set_current_channel(rx_hop_index + 1);
-                    Serial.println(F("[NODE_C] *** SYNC ACQUIRED ***"));
+                    Serial.print(F("[NODE_C] *** SYNC ACQUIRED *** Master Hop: "));
+                    Serial.println(rx_hop_index);
                 }
             } else if (f.type == FRAME_TYPE_ACK && f.src == RELAY && f.dst == ROLE) {
                 stats_acked++;
@@ -244,10 +248,14 @@ void loop() {
         }
     }
 
+    // If unsynced: Park on each channel for 80 ms to guarantee catching Node B's 25ms hops!
+    static uint32_t last_scan_switch_ms = 0;
     if (!synced) {
-        radio.setChannel(scan_ch);
-        scan_ch = (scan_ch + 1) % (CHANNEL_BASE + NUM_CHANNELS);
-        delay(2);
+        if (millis() - last_scan_switch_ms >= 80) {
+            last_scan_switch_ms = millis();
+            radio.setChannel(scan_ch);
+            scan_ch = (scan_ch + 1) % (CHANNEL_BASE + NUM_CHANNELS);
+        }
         return;
     }
 
