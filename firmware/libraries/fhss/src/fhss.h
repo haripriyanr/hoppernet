@@ -20,7 +20,9 @@
 #define NUM_CHANNELS      124
 #define CHANNEL_BASE      2
 #define DWELL_US          25000UL
-#define PHASE_A2B_US      12000UL
+#define PHASE_SYNC_US     2000UL
+#define PHASE_FWD_US      13000UL   // [2ms, 13ms): Forward Path (A -> B -> C)
+#define PHASE_REV_US      24000UL   // [13ms, 24ms): Reverse Path (C -> B -> A)
 #define SYNC_PERIOD_HOPS  20
 
 #define HEADER_LEN        8

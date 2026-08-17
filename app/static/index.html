@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HopperNet / MedRelay Auto-Detect Hub</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-wrapper">
+        <!-- Header -->
+        <header class="top-header">
+            <div class="brand-title">
+                <div class="pulse-icon"></div>
+                <div>
+                    <h1>MEDRELAY AUTO-HUB</h1>
+                    <div class="subtitle">Auto-Detecting Multi-Node Mesh Controller & Bidirectional Comms</div>
+                </div>
+            </div>
+            <div class="header-status">
+                <span class="status-pill" id="hub-status">Connecting...</span>
+            </div>
+        </header>
+
+        <!-- Auto-Detected Nodes Rack -->
+        <section class="node-rack">
+            <!-- Node A -->
+            <div class="node-box" id="box-node-a">
+                <div class="node-box-header">
+                    <span class="node-tag" style="color:#38bdf8;">NODE A (Source)</span>
+                    <span class="port-badge" id="port-node-a">DISCONNECTED</span>
+                </div>
+                <div class="node-metrics">
+                    <div class="m-row"><span>Sent:</span> <span class="val" id="sent-node-a">0</span></div>
+                    <div class="m-row"><span>Received:</span> <span class="val" id="recv-node-a">0</span></div>
+                    <div class="m-row"><span>Sync:</span> <span class="val" id="sync-node-a">--</span></div>
+                </div>
+            </div>
+
+            <!-- Node B -->
+            <div class="node-box" id="box-node-b">
+                <div class="node-box-header">
+                    <span class="node-tag" style="color:#f59e0b;">NODE B (Relay)</span>
+                    <span class="port-badge" id="port-node-b">DISCONNECTED</span>
+                </div>
+                <div class="node-metrics">
+                    <div class="m-row"><span>Forward Buf:</span> <span class="val" id="fbuf-node-b">0</span></div>
+                    <div class="m-row"><span>Reverse Buf:</span> <span class="val" id="rbuf-node-b">0</span></div>
+                    <div class="m-row"><span>Jammed Ch:</span> <span class="val" id="jam-node-b">0</span></div>
+                </div>
+            </div>
+
+            <!-- Node C -->
+            <div class="node-box" id="box-node-c">
+                <div class="node-box-header">
+                    <span class="node-tag" style="color:#34d399;">NODE C (Dest)</span>
+                    <span class="port-badge" id="port-node-c">DISCONNECTED</span>
+                </div>
+                <div class="node-metrics">
+                    <div class="m-row"><span>Received:</span> <span class="val" id="recv-node-c">0</span></div>
+                    <div class="m-row"><span>Returns Sent:</span> <span class="val" id="sent-node-c">0</span></div>
+                    <div class="m-row"><span>Sync:</span> <span class="val" id="sync-node-c">--</span></div>
+                </div>
+            </div>
+
+            <!-- Jammer -->
+            <div class="node-box" id="box-jammer">
+                <div class="node-box-header">
+                    <span class="node-tag" style="color:#f87171;">JAMMER</span>
+                    <span class="port-badge" id="port-jammer">DISCONNECTED</span>
+                </div>
+                <div class="node-metrics">
+                    <div class="m-row"><span>State:</span> <span class="val" id="state-jammer">IDLE</span></div>
+                    <div class="m-row"><span>Channel:</span> <span class="val" id="ch-jammer">--</span></div>
+                    <div class="m-row"><span>TX Packets:</span> <span class="val" id="tx-jammer">0</span></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Bidirectional Messenger & Console -->
+        <main class="main-hub">
+            <!-- Left: Bidirectional Chat Console (A <-> C) -->
+            <div class="chat-panel">
+                <div class="panel-title">
+                    <h2>Bidirectional Mesh Messenger (A ⇄ B ⇄ C)</h2>
+                    <span style="font-size:0.75rem; color:var(--text-muted);">Slotted FHSS Link</span>
+                </div>
+                <div class="chat-stream" id="chat-stream">
+                    <!-- Dynamic chat messages -->
+                </div>
+                <div class="chat-input-area">
+                    <select id="chat-direction" style="background:#1e293b; color:white; border:1px solid var(--border); border-radius:8px; padding:0 0.5rem; font-size:0.8rem;">
+                        <option value="A_TO_C">Node A ➔ C (Forward)</option>
+                        <option value="C_TO_A">Node C ➔ A (Reverse)</option>
+                    </select>
+                    <input type="text" id="chat-input" placeholder="Type message to transmit over radio mesh..." maxlength="23" autocomplete="off">
+                    <button class="btn-send" id="btn-send">TRANSMIT</button>
+                </div>
+            </div>
+
+            <!-- Right: Real-Time Auto-Detected Serial Stream -->
+            <div class="chat-panel">
+                <div class="panel-title">
+                    <h2>Live Multi-Port Serial Bus Stream</h2>
+                    <span style="font-size:0.75rem; color:var(--text-muted);">115200 Baud Auto-Capture</span>
+                </div>
+                <div class="log-stream" id="log-stream">
+                    <!-- Serial logs stream -->
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

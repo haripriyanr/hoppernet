@@ -1,4 +1,4 @@
-// HopperNet Node B — Master Relay & Store-and-Forward Edge Buffer (Arduino Due)
+// HopperNet Node B — Master Relay & Dual-Direction Edge Buffer (Arduino Due)
 // Hardware: Arduino Due (SAM3X8E ARM @ 84MHz) + nRF24L01+ + 16x2 I2C LCD
 
 #include <Arduino.h>
@@ -12,14 +12,13 @@
 #define CE_PIN          9
 #define CSN_PIN         10
 #define ROLE            NODE_B
-#define DST_A           NODE_A
-#define DST_C           NODE_C
+#define NODE_SRC        NODE_A
+#define NODE_DST        NODE_C
 #define BAUD            115200
 
-#define BUFFER_MAX_ITEMS 256  // 256 packets stored in Due's 96 KB SRAM (~6.6 KB)
+#define BUFFER_MAX_ITEMS 128
 
 // ---------------- LCD & Radio State ----------------
-// Standard I2C LCD on Due pins 20 (SDA) / 21 (SCL). Default address 0x27 (or 0x3F).
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 bool lcd_available = false;
 
@@ -31,10 +30,10 @@ static uint8_t last_channel = 255;
 static uint8_t jam_counts[NUM_CHANNELS];
 
 // Stats
-static uint32_t stats_sent_c = 0;
-static uint32_t stats_acked_c = 0;
-static uint32_t stats_recv_a = 0;
-static uint16_t stats_buffer_depth = 0;
+static uint32_t stats_fwd_delivered = 0;
+static uint32_t stats_rev_delivered = 0;
+static uint32_t stats_recv_total = 0;
+static uint16_t stats_buffer_total = 0;
 static uint8_t  stats_blacklist_count = 0;
 static uint8_t  stats_current_ch = 0;
 static uint32_t stats_current_hop = 0;
@@ -42,47 +41,87 @@ static uint32_t last_lcd_update_ms = 0;
 
 // Deduplication
 static uint8_t last_seen_seq_a[256] = {0};
+static uint8_t last_seen_seq_c[256] = {0};
 
-// In-Memory Edge Buffer structure
+// In-Memory Edge Buffer Structure
 struct BufferedPacket {
+    uint8_t src;
+    uint8_t dst;
     uint8_t seq;
     uint8_t len;
     char payload[PAYLOAD_LEN];
 };
 
-static BufferedPacket ring_buffer[BUFFER_MAX_ITEMS];
-static int buf_head = 0;
-static int buf_tail = 0;
-static int buf_count = 0;
+// Queue 1: Forward Buffer (A -> C)
+static BufferedPacket fwd_queue[BUFFER_MAX_ITEMS];
+static int fq_head = 0, fq_tail = 0, fq_count = 0;
 
-// ---------------- Buffer Operations (SRAM Ring Buffer) ----------------
-bool buffer_push(uint8_t seq, const char *data, uint8_t len) {
-    if (buf_count < BUFFER_MAX_ITEMS) {
-        ring_buffer[buf_head].seq = seq;
-        ring_buffer[buf_head].len = (len < PAYLOAD_LEN) ? len : (PAYLOAD_LEN - 1);
-        memset(ring_buffer[buf_head].payload, 0, PAYLOAD_LEN);
-        memcpy(ring_buffer[buf_head].payload, data, ring_buffer[buf_head].len);
-        buf_head = (buf_head + 1) % BUFFER_MAX_ITEMS;
-        buf_count++;
-        stats_buffer_depth = buf_count;
+// Queue 2: Reverse Buffer (C -> A)
+static BufferedPacket rev_queue[BUFFER_MAX_ITEMS];
+static int rq_head = 0, rq_tail = 0, rq_count = 0;
+
+// ---------------- Buffer Operations ----------------
+bool fwd_push(uint8_t src, uint8_t dst, uint8_t seq, const char *data, uint8_t len) {
+    if (fq_count < BUFFER_MAX_ITEMS) {
+        fwd_queue[fq_head].src = src;
+        fwd_queue[fq_head].dst = dst;
+        fwd_queue[fq_head].seq = seq;
+        fwd_queue[fq_head].len = (len < PAYLOAD_LEN) ? len : (PAYLOAD_LEN - 1);
+        memset(fwd_queue[fq_head].payload, 0, PAYLOAD_LEN);
+        memcpy(fwd_queue[fq_head].payload, data, fwd_queue[fq_head].len);
+        fq_head = (fq_head + 1) % BUFFER_MAX_ITEMS;
+        fq_count++;
+        stats_buffer_total = fq_count + rq_count;
         return true;
     }
     return false;
 }
 
-bool buffer_peek(BufferedPacket *out) {
-    if (buf_count > 0) {
-        *out = ring_buffer[buf_tail];
+bool fwd_peek(BufferedPacket *out) {
+    if (fq_count > 0) {
+        *out = fwd_queue[fq_tail];
         return true;
     }
     return false;
 }
 
-void buffer_pop() {
-    if (buf_count > 0) {
-        buf_tail = (buf_tail + 1) % BUFFER_MAX_ITEMS;
-        buf_count--;
-        stats_buffer_depth = buf_count;
+void fwd_pop() {
+    if (fq_count > 0) {
+        fq_tail = (fq_tail + 1) % BUFFER_MAX_ITEMS;
+        fq_count--;
+        stats_buffer_total = fq_count + rq_count;
+    }
+}
+
+bool rev_push(uint8_t src, uint8_t dst, uint8_t seq, const char *data, uint8_t len) {
+    if (rq_count < BUFFER_MAX_ITEMS) {
+        rev_queue[rq_head].src = src;
+        rev_queue[rq_head].dst = dst;
+        rev_queue[rq_head].seq = seq;
+        rev_queue[rq_head].len = (len < PAYLOAD_LEN) ? len : (PAYLOAD_LEN - 1);
+        memset(rev_queue[rq_head].payload, 0, PAYLOAD_LEN);
+        memcpy(rev_queue[rq_head].payload, data, rev_queue[rq_head].len);
+        rq_head = (rq_head + 1) % BUFFER_MAX_ITEMS;
+        rq_count++;
+        stats_buffer_total = fq_count + rq_count;
+        return true;
+    }
+    return false;
+}
+
+bool rev_peek(BufferedPacket *out) {
+    if (rq_count > 0) {
+        *out = rev_queue[rq_tail];
+        return true;
+    }
+    return false;
+}
+
+void rev_pop() {
+    if (rq_count > 0) {
+        rq_tail = (rq_tail + 1) % BUFFER_MAX_ITEMS;
+        rq_count--;
+        stats_buffer_total = fq_count + rq_count;
     }
 }
 
@@ -102,7 +141,7 @@ void broadcast_sync(uint32_t hop, uint32_t master_ts) {
     f.magic = FHSS_MAGIC;
     f.type = FRAME_TYPE_SYNC;
     f.src = ROLE;
-    f.dst = 0; // Broadcast
+    f.dst = 0;
     f.seq = (uint8_t)(hop & 0xFF);
     f.hop_index = (uint8_t)(hop & 0xFF);
 
@@ -145,7 +184,7 @@ void update_lcd() {
     char line0[17];
     char line1[17];
     snprintf(line0, sizeof(line0), "CH:%-3u  HOP:%-5lu", stats_current_ch, (unsigned long)(stats_current_hop % 100000));
-    snprintf(line1, sizeof(line1), "BUF:%-2u pk JAM:%-2u", stats_buffer_depth, stats_blacklist_count);
+    snprintf(line1, sizeof(line1), "F:%u R:%u JAM:%-2u", fq_count, rq_count, stats_blacklist_count);
 
     lcd.setCursor(0, 0);
     lcd.print(line0);
@@ -158,18 +197,17 @@ void setup() {
     Serial.begin(BAUD);
     delay(1000);
     Serial.println(F("=========================================="));
-    Serial.println(F("  HopperNet Node B — Master Relay (Due)   "));
+    Serial.println(F(" HopperNet Node B — Bidirectional Relay   "));
     Serial.println(F("=========================================="));
 
     blacklist_clear_all(blacklist);
     memset(jam_counts, 0, sizeof(jam_counts));
 
-    // Initialize 16x2 LCD
     Wire.begin();
     lcd.init();
     lcd.backlight();
     lcd.setCursor(0, 0);
-    lcd.print(F("MEDRELAY NODE B "));
+    lcd.print(F("MEDRELAY DUAL-B "));
     lcd.setCursor(0, 1);
     lcd.print(F("BOOTING MESH... "));
     lcd_available = true;
@@ -190,7 +228,7 @@ void setup() {
     radio.setAutoAck(false);
     radio.startListening();
 
-    Serial.println(F("[NODE_B] Mesh ready. Starting master FHSS clock..."));
+    Serial.println(F("[NODE_B] Mesh ready. Starting bidirectional clock..."));
     if (lcd_available) lcd.clear();
 }
 
@@ -209,38 +247,38 @@ void loop() {
         broadcast_sync(hop, now_us);
     }
 
-    // 2. A -> B RX Window [2ms, 12ms)
-    if (phase >= 2000 && phase < PHASE_A2B_US) {
+    // 2. FORWARD PATH: [2ms, 13ms)
+    // A -> B Receive window [2ms, 7ms)
+    if (phase >= 2000 && phase < 7000) {
         if (radio.available()) {
             struct fhss_frame rx;
             radio.read(&rx, MAX_FRAME_LEN);
-            if (frame_valid(&rx, PAYLOAD_LEN) && rx.type == FRAME_TYPE_DATA && rx.src == DST_A) {
-                stats_recv_a++;
+            if (frame_valid(&rx, PAYLOAD_LEN) && rx.type == FRAME_TYPE_DATA && rx.src == NODE_SRC) {
+                stats_recv_total++;
                 uint8_t plen = rx.payload[0];
                 char msg[25] = {0};
                 if (plen > PAYLOAD_LEN - 1) plen = PAYLOAD_LEN - 1;
                 memcpy(msg, &rx.payload[1], plen);
 
-                // Deduplicate & buffer
                 if (last_seen_seq_a[rx.seq] == 0) {
                     last_seen_seq_a[rx.seq] = 1;
-                    buffer_push(rx.seq, msg, plen);
-                    Serial.print(F("[NODE_B] RX A#"));
+                    fwd_push(NODE_SRC, NODE_DST, rx.seq, msg, plen);
+                    Serial.print(F("[NODE_B] RX FWD A#"));
                     Serial.print(rx.seq);
                     Serial.print(F(": \""));
                     Serial.print(msg);
-                    Serial.print(F("\" (Buffer: "));
-                    Serial.print(stats_buffer_depth);
+                    Serial.print(F("\" (FwdBuf: "));
+                    Serial.print(fq_count);
                     Serial.println(F(")"));
                 }
 
-                // Send ACK immediately
+                // Immediate ACK to A
                 struct fhss_frame ack;
                 memset(&ack, 0, sizeof(ack));
                 ack.magic = FHSS_MAGIC;
                 ack.type = FRAME_TYPE_ACK;
                 ack.src = ROLE;
-                ack.dst = DST_A;
+                ack.dst = NODE_SRC;
                 ack.seq = rx.seq;
                 ack.hop_index = (uint8_t)(hop & 0xFF);
                 ack.payload[0] = rx.seq;
@@ -253,16 +291,16 @@ void loop() {
         }
     }
 
-    // 3. B -> C TX Window & Store-and-Forward Drain [12ms, 25ms)
-    if (phase >= PHASE_A2B_US) {
+    // B -> C Drain window [7ms, 13ms)
+    if (phase >= 7000 && phase < PHASE_FWD_US) {
         BufferedPacket pkt;
-        if (buffer_peek(&pkt)) {
+        if (fwd_peek(&pkt)) {
             struct fhss_frame tx;
             memset(&tx, 0, sizeof(tx));
             tx.magic = FHSS_MAGIC;
             tx.type = FRAME_TYPE_DATA;
             tx.src = ROLE;
-            tx.dst = DST_C;
+            tx.dst = NODE_DST;
             tx.seq = pkt.seq;
             tx.hop_index = (uint8_t)(hop & 0xFF);
             tx.flags = FLAG_ACK_REQ;
@@ -272,18 +310,16 @@ void loop() {
 
             radio.stopListening();
             radio.write(&tx, MAX_FRAME_LEN);
-            stats_sent_c++;
             radio.startListening();
 
-            // Wait up to 6ms for Node C ACK
             uint32_t wait_start = micros();
             bool got_ack = false;
-            while (micros() - wait_start < 6000) {
+            while (micros() - wait_start < 4000) {
                 if (radio.available()) {
                     struct fhss_frame ack;
                     radio.read(&ack, MAX_FRAME_LEN);
                     if (frame_valid(&ack, PAYLOAD_LEN) && ack.type == FRAME_TYPE_ACK &&
-                        ack.src == DST_C && ack.dst == ROLE && ack.payload[0] == pkt.seq) {
+                        ack.src == NODE_DST && ack.dst == ROLE && ack.payload[0] == pkt.seq) {
                         got_ack = true;
                         break;
                     }
@@ -291,17 +327,108 @@ void loop() {
             }
 
             if (got_ack) {
-                buffer_pop();
-                stats_acked_c++;
-                Serial.print(F("[NODE_B] Delivered C#"));
+                fwd_pop();
+                stats_fwd_delivered++;
+                Serial.print(F("[NODE_B] Delivered to C#"));
                 Serial.print(pkt.seq);
-                Serial.print(F(" OK (Buffer: "));
-                Serial.print(stats_buffer_depth);
+                Serial.print(F(" OK (FwdBuf: "));
+                Serial.print(fq_count);
+                Serial.println(F(")"));
+            }
+        }
+    }
+
+    // 3. REVERSE PATH: [13ms, 24ms)
+    // C -> B Receive window [13ms, 18ms)
+    if (phase >= PHASE_FWD_US && phase < 18000) {
+        if (radio.available()) {
+            struct fhss_frame rx;
+            radio.read(&rx, MAX_FRAME_LEN);
+            if (frame_valid(&rx, PAYLOAD_LEN) && rx.type == FRAME_TYPE_DATA && rx.src == NODE_DST) {
+                stats_recv_total++;
+                uint8_t plen = rx.payload[0];
+                char msg[25] = {0};
+                if (plen > PAYLOAD_LEN - 1) plen = PAYLOAD_LEN - 1;
+                memcpy(msg, &rx.payload[1], plen);
+
+                if (last_seen_seq_c[rx.seq] == 0) {
+                    last_seen_seq_c[rx.seq] = 1;
+                    rev_push(NODE_DST, NODE_SRC, rx.seq, msg, plen);
+                    Serial.print(F("[NODE_B] RX REV C#"));
+                    Serial.print(rx.seq);
+                    Serial.print(F(": \""));
+                    Serial.print(msg);
+                    Serial.print(F("\" (RevBuf: "));
+                    Serial.print(rq_count);
+                    Serial.println(F(")"));
+                }
+
+                // Immediate ACK to C
+                struct fhss_frame ack;
+                memset(&ack, 0, sizeof(ack));
+                ack.magic = FHSS_MAGIC;
+                ack.type = FRAME_TYPE_ACK;
+                ack.src = ROLE;
+                ack.dst = NODE_DST;
+                ack.seq = rx.seq;
+                ack.hop_index = (uint8_t)(hop & 0xFF);
+                ack.payload[0] = rx.seq;
+                frame_fill_crc(&ack, PAYLOAD_LEN);
+
+                radio.stopListening();
+                radio.write(&ack, MAX_FRAME_LEN);
+                radio.startListening();
+            }
+        }
+    }
+
+    // B -> A Drain window [18ms, 24ms)
+    if (phase >= 18000 && phase < PHASE_REV_US) {
+        BufferedPacket pkt;
+        if (rev_peek(&pkt)) {
+            struct fhss_frame tx;
+            memset(&tx, 0, sizeof(tx));
+            tx.magic = FHSS_MAGIC;
+            tx.type = FRAME_TYPE_DATA;
+            tx.src = ROLE;
+            tx.dst = NODE_SRC;
+            tx.seq = pkt.seq;
+            tx.hop_index = (uint8_t)(hop & 0xFF);
+            tx.flags = FLAG_ACK_REQ;
+            tx.payload[0] = pkt.len;
+            memcpy(&tx.payload[1], pkt.payload, pkt.len);
+            frame_fill_crc(&tx, PAYLOAD_LEN);
+
+            radio.stopListening();
+            radio.write(&tx, MAX_FRAME_LEN);
+            radio.startListening();
+
+            uint32_t wait_start = micros();
+            bool got_ack = false;
+            while (micros() - wait_start < 4000) {
+                if (radio.available()) {
+                    struct fhss_frame ack;
+                    radio.read(&ack, MAX_FRAME_LEN);
+                    if (frame_valid(&ack, PAYLOAD_LEN) && ack.type == FRAME_TYPE_ACK &&
+                        ack.src == NODE_SRC && ack.dst == ROLE && ack.payload[0] == pkt.seq) {
+                        got_ack = true;
+                        break;
+                    }
+                }
+            }
+
+            if (got_ack) {
+                rev_pop();
+                stats_rev_delivered++;
+                Serial.print(F("[NODE_B] Returned to A#"));
+                Serial.print(pkt.seq);
+                Serial.print(F(" OK (RevBuf: "));
+                Serial.print(rq_count);
                 Serial.println(F(")"));
             }
         }
 
-        // Tail of hop: Jammer scan
+        // Tail of dwell: carrier scan
         scan_jammer();
     }
 

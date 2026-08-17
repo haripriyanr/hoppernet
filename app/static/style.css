@@ -1,0 +1,312 @@
+:root {
+    --bg-dark: #090d16;
+    --bg-card: #111827;
+    --bg-card-hover: #1f293d;
+    --border: #243044;
+    --border-accent: #3b82f6;
+    --cyan: #06b6d4;
+    --cyan-glow: rgba(6, 182, 212, 0.4);
+    --green: #10b981;
+    --green-glow: rgba(16, 185, 129, 0.3);
+    --red: #ef4444;
+    --amber: #f59e0b;
+    --text-main: #f9fafb;
+    --text-muted: #9ca3af;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-sans: 'Inter', system-ui, sans-serif;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-dark);
+    color: var(--text-main);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+    padding: 1rem 1.5rem;
+}
+
+.app-wrapper {
+    max-width: 1440px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+/* Header */
+.top-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem 1.5rem;
+}
+
+.brand-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.pulse-icon {
+    width: 14px;
+    height: 14px;
+    background: var(--cyan);
+    border-radius: 50%;
+    box-shadow: 0 0 12px var(--cyan);
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% { transform: scale(0.9); opacity: 0.7; }
+    50% { transform: scale(1.15); opacity: 1; }
+    100% { transform: scale(0.9); opacity: 0.7; }
+}
+
+.brand-title h1 {
+    font-size: 1.25rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+}
+
+.subtitle {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.header-status {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    font-family: var(--font-mono);
+}
+
+.status-pill {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--green);
+    border: 1px solid var(--green);
+    padding: 0.2rem 0.6rem;
+    border-radius: 20px;
+    font-size: 0.75rem;
+}
+
+/* Auto-Detected Node Rack */
+.node-rack {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+}
+
+@media (max-width: 900px) {
+    .node-rack {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+.node-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    transition: all 0.2s ease;
+}
+
+.node-box.connected {
+    border-color: var(--border-accent);
+    background: linear-gradient(180deg, #162033 0%, var(--bg-card) 100%);
+}
+
+.node-box-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.node-tag {
+    font-weight: 800;
+    font-size: 0.85rem;
+    letter-spacing: 0.05em;
+}
+
+.port-badge {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    background: rgba(255,255,255,0.08);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+}
+
+.node-metrics {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+}
+
+.m-row {
+    display: flex;
+    justify-content: space-between;
+    color: var(--text-muted);
+}
+
+.m-row span.val {
+    font-family: var(--font-mono);
+    color: var(--text-main);
+    font-weight: 600;
+}
+
+/* Main Hub Layout */
+.main-hub {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+}
+
+@media (max-width: 800px) {
+    .main-hub {
+        grid-template-columns: 1fr;
+    }
+}
+
+.chat-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    height: 520px;
+}
+
+.panel-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.panel-title h2 {
+    font-size: 0.95rem;
+    font-weight: 700;
+}
+
+.chat-stream {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding-right: 0.5rem;
+}
+
+.chat-bubble {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    background: var(--bg-card-hover);
+    border: 1px solid var(--border);
+    font-size: 0.9rem;
+    animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.chat-bubble.outbound {
+    border-left: 3px solid var(--cyan);
+}
+
+.chat-bubble.inbound {
+    border-left: 3px solid var(--green);
+}
+
+.bubble-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+.bubble-content {
+    font-weight: 500;
+}
+
+.chat-input-area {
+    margin-top: 1rem;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.chat-input-area input {
+    flex: 1;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    color: white;
+    font-size: 0.9rem;
+    outline: none;
+}
+
+.chat-input-area input:focus {
+    border-color: var(--cyan);
+}
+
+.btn-send {
+    background: linear-gradient(135deg, #0ea5e9, #2563eb);
+    border: none;
+    border-radius: 8px;
+    color: white;
+    font-weight: 700;
+    font-size: 0.8rem;
+    padding: 0 1.25rem;
+    cursor: pointer;
+}
+
+/* Console Log Panel */
+.log-stream {
+    flex: 1;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.log-entry {
+    color: #94a3b8;
+    line-height: 1.4;
+}
+
+.log-entry .port {
+    color: var(--cyan);
+    font-weight: 600;
+}
+
+.log-entry .role {
+    color: var(--green);
+    font-weight: 600;
+}
