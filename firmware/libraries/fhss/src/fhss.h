@@ -1,156 +1,292 @@
 #ifndef FHSS_H
 #define FHSS_H
 
-#include <stdint.h>
-#include <stddef.h>
+#include <Arduino.h>
+#include <SPI.h>
+#include <RF24.h>
 
-#define FHSS_MAGIC        0x5A
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#include <mbedtls/gcm.h>
+#endif
+
+// ---------------- Hardware Pinout (ESP32 VSPI) ----------------
+#ifndef RF_CE_PIN
+#define RF_CE_PIN 4
+#endif
+#ifndef RF_CSN_PIN
+#define RF_CSN_PIN 5
+#endif
+#ifndef RF_SCK_PIN
+#define RF_SCK_PIN 18
+#endif
+#ifndef RF_MISO_PIN
+#define RF_MISO_PIN 19
+#endif
+#ifndef RF_MOSI_PIN
+#define RF_MOSI_PIN 23
+#endif
+
+// ---------------- Node Identifiers ----------------
 #define NODE_A            1
 #define NODE_B            2
 #define NODE_C            3
 
-#define FHSS_SEED         0xC0FFEE01u
-static const uint8_t FHSS_PIPE_ADDR[5] = {0x48, 0x4F, 0x50, 0x50, 0x31}; // "HOPP1"
+// ---------------- RF Spectrum Configuration ----------------
+#define NUM_SYNC_ANCHORS  4
+static const uint8_t SYNC_ANCHORS[NUM_SYNC_ANCHORS] = { 0, 40, 80, 120 };
 
-#define FRAME_TYPE_SYNC       0x01
-#define FRAME_TYPE_DATA       0x02
-#define FRAME_TYPE_ACK        0x03
-#define FRAME_TYPE_JAMREPORT  0x04
-#define FRAME_TYPE_STATUS     0x05
+static inline uint8_t getSyncChannel(uint32_t sf) {
+    return SYNC_ANCHORS[sf & 0x03];
+}
 
-#define NUM_CHANNELS      124
-#define CHANNEL_BASE      2
-#define DWELL_US          25000UL
-#define PHASE_SYNC_US     2000UL
-#define PHASE_FWD_US      13000UL   // [2ms, 13ms): Forward Path (A -> B -> C)
-#define PHASE_REV_US      24000UL   // [13ms, 24ms): Reverse Path (C -> B -> A)
-#define SYNC_PERIOD_HOPS  20
+#define RF_CHANNEL_SYNC   0        // Primary rendezvous / recovery channel
+#define RF_CHANNEL_FIRST  2        // Channels 2..125 = 124 data channels
+#define RF_CHANNEL_COUNT  124
+#define RF_CHANNEL_LAST   125
+#define BLACKLIST_BYTES   16       // 128 bits, 124 used
+#define RF_PAYLOAD_SIZE   32
+#define DATA_PLAINTEXT_MAX 8       // 8 bytes plaintext payload per frame fragment
+#define GCM_TAG_SIZE      8        // 8-byte AES-GCM authentication tag
+#define FHSS_SEED_AB      0x41B2D931UL
+#define FHSS_SEED_BC      0xC73A91E5UL
 
-#define NUM_ANCHOR_CHANNELS 4
-static const uint8_t ANCHOR_CHANNELS[NUM_ANCHOR_CHANNELS] = {10, 42, 74, 106};
+// Backwards compatibility aliases
+#define BLACKLIST_SIZE    BLACKLIST_BYTES
+#define CHANNEL_BASE      RF_CHANNEL_FIRST
+#define NUM_CHANNELS      RF_CHANNEL_COUNT
+#define FHSS_SEED         FHSS_SEED_AB
+#define DWELL_US          SUPERFRAME_US
+#define NUM_ANCHOR_CHANNELS 6
+static const uint8_t ANCHOR_CHANNELS[NUM_ANCHOR_CHANNELS] = { 10, 30, 50, 70, 90, 110 };
 
-#define HEADER_LEN        8
-#define PAYLOAD_LEN       24
-#define MAX_FRAME_LEN     (HEADER_LEN + PAYLOAD_LEN)
+// ---------------- 50 ms Slotted Superframe Timing ----------------
+// Node B is master clock:
+// 0 - 4 ms   : Sync & Blacklist Beacon on fixed rendezvous Channel 0
+// 4 - 16 ms  : A -> B Forward Path on hop channel AB (12 ms window)
+// 16 - 28 ms : B -> C Forward Drain on hop channel BC (12 ms window)
+// 28 - 40 ms : C -> B Return Path on hop channel BC (12 ms window)
+// 40 - 48 ms : B -> A Return Drain on hop channel AB (8 ms window)
+// 48 - 50 ms : Guard / RPD Jammer carrier probe (2 ms window)
+#define SUPERFRAME_US     50000UL
+#define HOPS_PER_SEC      20       // 20 superframes per second (1000ms / 50ms)
+#define SLOT_SYNC_US      4000UL
+#define SLOT_AB_RX_US     12000UL
+#define SLOT_BC_TX_US     12000UL
+#define SLOT_BC_RX_US     12000UL
+#define SLOT_AB_TX_US     8000UL
 
-#define FLAG_ACK_REQ      0x01
+#define AB_RX_START       SLOT_SYNC_US                     // 4,000 us
+#define BC_TX_START       (AB_RX_START + SLOT_AB_RX_US)    // 16,000 us
+#define BC_RX_START       (BC_TX_START + SLOT_BC_TX_US)    // 28,000 us
+#define AB_TX_START       (BC_RX_START + SLOT_BC_RX_US)    // 40,000 us
+#define GUARD_START       (AB_TX_START + SLOT_AB_TX_US)    // 48,000 us
 
-#define BLACKLIST_SIZE    ((NUM_CHANNELS + 7) / 8)
+// ---------------- Protocol Constants & Packet Structures ----------------
+#define SP_MAGIC          0x5350
+#define SP_VERSION        2
 
-struct fhss_telemetry {
-    uint32_t sent;
-    uint32_t acked;
-    uint32_t lost;
-    float    pdr;
-    int8_t   rssi_dbm;
-    uint16_t buffer_depth;
-    uint8_t  blacklist_count;
-    uint8_t  current_channel;
-    uint32_t current_hop;
-    uint8_t  synced;
-    uint8_t  channel_quality; // 0-100%
+enum FrameType : uint8_t {
+    FT_SYNC = 1,
+    FT_DATA = 2,
+    FT_ACK = 3,
+    FT_CUSTODY = 4,
+    FT_DELIVERY = 5,
+    FT_MAP = 6
 };
 
-struct fhss_frame {
-    uint8_t magic;
-    uint8_t type;
-    uint8_t src;
-    uint8_t dst;
-    uint8_t seq;
-    uint8_t hop_index;
-    uint8_t flags;
-    uint8_t crc;
-    uint8_t payload[PAYLOAD_LEN];
-} __attribute__((packed));
+struct __attribute__((packed)) DataFrame {
+    uint16_t magic;       // 2
+    uint8_t  version;     // 1
+    uint8_t  type;        // 1
+    uint8_t  src;         // 1
+    uint8_t  dst;         // 1
+    uint32_t sf;          // 4 (Superframe counter)
+    uint16_t msgId;       // 2
+    uint8_t  frag;        // 1
+    uint8_t  total;       // 1
+    uint8_t  flags;       // 1
+    uint8_t  len;         // 1
+    uint8_t  ciphertext[DATA_PLAINTEXT_MAX]; // 8
+    uint8_t  tag[GCM_TAG_SIZE];              // 8
+}; // Exactly 32 bytes
 
-static inline uint8_t crc8(const uint8_t *data, size_t len) {
-    uint8_t crc = 0;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int b = 0; b < 8; b++) {
-            if (crc & 0x80) crc = (uint8_t)((crc << 1) ^ 0x07);
-            else crc = (uint8_t)(crc << 1);
+struct __attribute__((packed)) AckFrame {
+    uint16_t magic;       // 2
+    uint8_t  version;     // 1
+    uint8_t  type;        // 1
+    uint8_t  src;         // 1
+    uint8_t  dst;         // 1
+    uint32_t sf;          // 4
+    uint16_t msgId;       // 2
+    uint8_t  frag;        // 1
+    uint8_t  code;        // 1 (1 = CUSTODY, 2 = DELIVERY)
+    uint8_t  reserved[18];// 18 -> Total: 32 bytes
+}; // Exactly 32 bytes
+
+struct __attribute__((packed)) SyncFrame {
+    uint16_t magic;       // 2
+    uint8_t  version;     // 1
+    uint8_t  type;        // 1
+    uint8_t  src;         // 1
+    uint8_t  dst;         // 1
+    uint32_t sf;          // 4
+    uint16_t mapVersion;  // 2
+    uint8_t  blacklist[BLACKLIST_BYTES]; // 16
+    uint8_t  reserved[4]; // 4 -> Total: 32 bytes
+}; // Exactly 32 bytes
+
+static_assert(sizeof(DataFrame) == 32, "DataFrame must be exactly 32 bytes");
+static_assert(sizeof(AckFrame) == 32, "AckFrame must be exactly 32 bytes");
+static_assert(sizeof(SyncFrame) == 32, "SyncFrame must be exactly 32 bytes");
+
+// ---------------- Demo E2E Encryption Key ----------------
+// Node A and Node C use this key for AES-GCM. Node B never decrypts payloads.
+static const uint8_t E2E_KEY[16] = {
+    0x53, 0x50, 0x2D, 0x45, 0x32, 0x45, 0x2D, 0x44,
+    0x45, 0x4D, 0x4F, 0x2D, 0x32, 0x30, 0x32, 0x36
+};
+
+// ---------------- Blacklist Bitset Helpers ----------------
+static inline void blClear(uint8_t *b) {
+    memset(b, 0, BLACKLIST_BYTES);
+}
+
+static inline bool blGet(const uint8_t *b, uint8_t ch) {
+    if (ch < RF_CHANNEL_FIRST || ch > RF_CHANNEL_LAST) return false;
+    uint8_t i = ch - RF_CHANNEL_FIRST;
+    return (b[i >> 3] >> (i & 7)) & 1U;
+}
+
+static inline void blSet(uint8_t *b, uint8_t ch, bool on = true) {
+    if (ch < RF_CHANNEL_FIRST || ch > RF_CHANNEL_LAST) return;
+    uint8_t i = ch - RF_CHANNEL_FIRST;
+    if (on) b[i >> 3] |= (1U << (i & 7));
+    else    b[i >> 3] &= ~(1U << (i & 7));
+}
+
+static inline uint8_t blCount(const uint8_t *b) {
+    uint16_t n = 0;
+    for (uint8_t i = 0; i < RF_CHANNEL_COUNT; i++) {
+        if (b[i >> 3] & (1U << (i & 7))) n++;
+    }
+    return (uint8_t)n;
+}
+
+static inline uint32_t mix32(uint32_t x) {
+    x += 0x9E3779B9UL;
+    x = (x ^ (x >> 16)) * 0x85EBCA6BUL;
+    x = (x ^ (x >> 13)) * 0xC2B2AE35UL;
+    return x ^ (x >> 16);
+}
+
+// Deterministic adaptive pseudo-random channel calculation
+static inline uint8_t hopChannel(uint32_t sf, uint32_t seed, const uint8_t *blacklist) {
+    uint16_t healthy = RF_CHANNEL_COUNT - blCount(blacklist);
+    if (healthy == 0) return RF_CHANNEL_FIRST;
+    uint16_t rank = (uint16_t)(mix32(seed ^ sf) % healthy);
+    for (uint8_t ch = RF_CHANNEL_FIRST; ch <= RF_CHANNEL_LAST; ++ch) {
+        if (!blGet(blacklist, ch)) {
+            if (rank == 0) return ch;
+            rank--;
         }
     }
-    return crc;
+    return RF_CHANNEL_FIRST;
 }
 
-static inline uint8_t frame_crc(const struct fhss_frame *f, size_t payload_len) {
-    return crc8(f->payload, payload_len);
+static inline uint8_t channel_for_hop(uint32_t sf, uint32_t seed, const uint8_t *blacklist) {
+    return hopChannel(sf, seed, blacklist);
 }
 
-static inline void frame_fill_crc(struct fhss_frame *f, size_t payload_len) {
-    f->crc = frame_crc(f, payload_len);
+// ---------------- RF24 Safe Retuning & I/O ----------------
+static inline void setRadioChannel(RF24 &r, uint8_t ch) {
+    r.stopListening();
+    r.setChannel(ch);
+    r.flush_rx();
+    r.startListening();
 }
 
-static inline uint8_t frame_valid(const struct fhss_frame *f, size_t payload_len) {
-    if (f->magic != FHSS_MAGIC) return 0;
-    if (frame_crc(f, payload_len) != f->crc) return 0;
-    return 1;
+static inline bool txFrame(RF24 &radio, const void *frame) {
+    radio.stopListening();
+    bool ok = radio.write(frame, RF_PAYLOAD_SIZE);
+    radio.startListening();
+    return ok;
 }
 
-static inline uint32_t xorshift32(uint32_t state) {
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    return state;
+static inline bool rxFrame(RF24 &radio, void *frame) {
+    if (!radio.available()) return false;
+    radio.read(frame, RF_PAYLOAD_SIZE);
+    return true;
 }
 
-static inline void blacklist_set(uint8_t *mask, int ch) {
-    if (ch >= CHANNEL_BASE && ch < CHANNEL_BASE + NUM_CHANNELS) {
-        int idx = ch - CHANNEL_BASE;
-        mask[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+static inline void radioCommonBegin(RF24 &radio) {
+    radio.begin();
+    radio.setPALevel(RF24_PA_HIGH);
+    radio.setDataRate(RF24_250KBPS);
+    radio.setChannel(RF_CHANNEL_SYNC);
+    radio.setPayloadSize(RF_PAYLOAD_SIZE);
+    radio.setAutoAck(false);
+    radio.setCRCLength(RF24_CRC_16);
+    radio.openWritingPipe(0xC3C3C3C3C3LL);
+    radio.openReadingPipe(1, 0xC3C3C3C3C3LL);
+    radio.startListening();
+}
+
+// ---------------- Application Security (AES-128-GCM) ----------------
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+static inline void makeNonce(uint8_t nonce[12], uint8_t src, uint8_t dst,
+                             uint32_t sf, uint16_t msgId, uint8_t frag) {
+    nonce[0] = 0x53; nonce[1] = 0x50; nonce[2] = src; nonce[3] = dst;
+    memcpy(&nonce[4], &sf, 4);
+    memcpy(&nonce[8], &msgId, 2);
+    nonce[10] = frag; nonce[11] = SP_VERSION;
+}
+
+static inline bool gcmEncrypt(const uint8_t *plain, uint8_t len,
+                              uint8_t *cipher, uint8_t tag[8],
+                              uint8_t src, uint8_t dst, uint32_t sf,
+                              uint16_t msgId, uint8_t frag) {
+    if (len > DATA_PLAINTEXT_MAX) return false;
+    mbedtls_gcm_context g;
+    mbedtls_gcm_init(&g);
+    if (mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, E2E_KEY, 128) != 0) {
+        mbedtls_gcm_free(&g);
+        return false;
     }
+    uint8_t nonce[12];
+    makeNonce(nonce, src, dst, sf, msgId, frag);
+    int rc = mbedtls_gcm_crypt_and_tag(&g, MBEDTLS_GCM_ENCRYPT, len, nonce, sizeof(nonce),
+                                       nullptr, 0, plain, cipher, GCM_TAG_SIZE, tag);
+    mbedtls_gcm_free(&g);
+    return rc == 0;
 }
 
-static inline void blacklist_clear(uint8_t *mask, int ch) {
-    if (ch >= CHANNEL_BASE && ch < CHANNEL_BASE + NUM_CHANNELS) {
-        int idx = ch - CHANNEL_BASE;
-        mask[idx >> 3] &= (uint8_t)~(1 << (idx & 7));
+static inline bool gcmDecrypt(const uint8_t *cipher, uint8_t len,
+                              const uint8_t tag[8], uint8_t *plain,
+                              uint8_t src, uint8_t dst, uint32_t sf,
+                              uint16_t msgId, uint8_t frag) {
+    if (len > DATA_PLAINTEXT_MAX) return false;
+    mbedtls_gcm_context g;
+    mbedtls_gcm_init(&g);
+    if (mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, E2E_KEY, 128) != 0) {
+        mbedtls_gcm_free(&g);
+        return false;
     }
+    uint8_t nonce[12];
+    makeNonce(nonce, src, dst, sf, msgId, frag);
+    int rc = mbedtls_gcm_auth_decrypt(&g, len, nonce, sizeof(nonce), nullptr, 0,
+                                      tag, GCM_TAG_SIZE, cipher, plain);
+    mbedtls_gcm_free(&g);
+    return rc == 0;
 }
-
-static inline uint8_t blacklist_get(const uint8_t *mask, int ch) {
-    if (ch < CHANNEL_BASE || ch >= CHANNEL_BASE + NUM_CHANNELS) return 0;
-    int idx = ch - CHANNEL_BASE;
-    return (mask[idx >> 3] >> (idx & 7)) & 1;
-}
-
-static inline uint32_t blacklist_count(const uint8_t *mask) {
-    uint32_t n = 0;
-    for (int i = 0; i < BLACKLIST_SIZE; i++) {
-        uint8_t v = mask[i];
-        while (v) { n += (v & 1); v >>= 1; }
-    }
-    return n;
-}
-
-static inline void blacklist_clear_all(uint8_t *mask) {
-    for (int i = 0; i < BLACKLIST_SIZE; i++) mask[i] = 0;
-}
-
-static inline void blacklist_copy(uint8_t *dst, const uint8_t *src) {
-    for (int i = 0; i < BLACKLIST_SIZE; i++) dst[i] = src[i];
-}
-
-static inline uint8_t blacklist_equal(const uint8_t *a, const uint8_t *b) {
-    for (int i = 0; i < BLACKLIST_SIZE; i++) {
-        if (a[i] != b[i]) return 0;
-    }
-    return 1;
-}
-
-/* Deterministic channel selection: identical algorithm on every node keeps
- * A / B / C hopping in lockstep even when channels are blacklisted. */
-static inline uint8_t channel_for_hop(uint32_t hop, uint32_t seed,
-                                      const uint8_t *blacklist) {
-    uint32_t state = seed ^ (hop * 2654435761u);
-    for (int attempt = 0; attempt < NUM_CHANNELS * 2; attempt++) {
-        state = xorshift32(state);
-        uint8_t ch = (uint8_t)(CHANNEL_BASE + (state % NUM_CHANNELS));
-        if (!blacklist_get(blacklist, ch)) return ch;
-    }
-    return (uint8_t)(CHANNEL_BASE + (hop % NUM_CHANNELS));
-}
-
 #endif
+
+static inline bool validHeader(uint16_t magic, uint8_t version, uint8_t type,
+                               uint8_t src, uint8_t dst) {
+    if (magic != SP_MAGIC || version != SP_VERSION) return false;
+    if (type < FT_SYNC || type > FT_MAP) return false;
+    if (src < NODE_A || src > NODE_C) return false;
+    if (dst > NODE_C) return false;
+    return true;
+}
+
+#endif // FHSS_H
