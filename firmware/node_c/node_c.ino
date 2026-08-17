@@ -377,17 +377,19 @@ void setup() {
         channel_scores[i] = 100;
     }
 
-    // 1. SoftAP Setup
+    // 1. SoftAP Setup (Maximum RF Power + No Sleep)
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_AP);
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
     IPAddress local_IP(192, 168, 4, 1);
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
     WiFi.softAP(NODE_C_SSID, WIFI_PASS_COMMON, 11, 0, 4);
 
-    Serial.print(F("[WIFI] Access Point: "));
+    Serial.print(F("[WIFI] Access Point (MAX POWER): "));
     Serial.println(NODE_C_SSID);
     Serial.println(F("[WIFI] Web Portal: http://192.168.4.1"));
 
