@@ -80,12 +80,12 @@
 ### B. High-Power nRF24L01+ PA/LNA Radio Wiring (Back Header):
 Connect to the 2-row header at the bottom/back edge of the Arduino Mega (pins 50–53):
 
-| nRF24L01+ PA/LNA Pin | Arduino Mega Pin | Wire Type | Description |
+| nRF24L01+ PA/LNA Pin | Arduino Mega Pin | Wire Type | Function |
 | :--- | :--- | :--- | :--- |
-| **VCC (Pin 2)** | **3.3V** (or dedicated 3.3V adapter) | Male–Female | Radio Power (3.3V ONLY) |
+| **VCC (Pin 2)** | **3.3V** | Male–Female | Radio Power (3.3V ONLY) |
 | **GND (Pin 1)** | **GND** | Male–Female | Common Ground |
-| **CE (Pin 3)** | **Pin 9** (or D9 on pass-through) | Male–Female | Chip Enable |
-| **CSN (Pin 4)** | **Pin 53** | Male–Female | Hardware SPI SS |
+| **CE (Pin 3)** | **Pin 43** | Male–Female | Chip Enable (Open Header) |
+| **CSN (Pin 4)** | **Pin 45** | Male–Female | SPI Chip Select (Open Header) |
 | **SCK (Pin 5)** | **Pin 52** | Male–Female | Hardware SPI SCK |
 | **MOSI (Pin 6)** | **Pin 51** | Male–Female | Hardware SPI MOSI |
 | **MISO (Pin 7)** | **Pin 50** | Male–Female | Hardware SPI MISO |

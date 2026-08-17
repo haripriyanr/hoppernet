@@ -7,8 +7,8 @@
 #include "fhss.h"
 
 // ---------------- Hardware & Pin Config (Arduino Mega 2560) ----------------
-#define CE_PIN          9
-#define CSN_PIN         53
+#define CE_PIN          43
+#define CSN_PIN         45
 #define BAUD            115200
 
 #define CHANNEL_BASE    2
