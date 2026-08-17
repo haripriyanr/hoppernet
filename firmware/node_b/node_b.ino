@@ -1,5 +1,5 @@
 // HopperNet Node B — Master Relay & Dual-Direction Edge Buffer (ESP32)
-// PS Compliance: Real-time RSSI, PDR monitoring, Channel Quality Heatmap, Edge Buffering, Jammer Detection
+// 100% Local & Cloudless: 520 KB SRAM Store-and-Forward + Live Auto-Refreshing Web Portal
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -64,20 +64,15 @@ static volatile int rh_count = 0;
 static uint8_t last_seen_seq_a[256] = {0};
 static uint8_t last_seen_seq_c[256] = {0};
 
-// ---------------- PS Metrics: RSSI, PDR & Channel Quality ----------------
+// Telemetry Stats
 static uint8_t  blacklist[BLACKLIST_SIZE];
 static uint8_t  jam_counts[NUM_CHANNELS];
-static uint8_t  channel_scores[NUM_CHANNELS];
 static uint32_t stats_current_hop = 0;
 static uint8_t  stats_current_ch = 0;
 static uint32_t stats_recv_total = 0;
 static uint32_t stats_fwd_delivered = 0;
 static uint32_t stats_rev_delivered = 0;
-static uint32_t stats_fwd_lost = 0;
 static uint8_t  stats_blacklist_count = 0;
-static int8_t   stats_rssi_dbm = -68;
-static float    stats_pdr = 100.0f;
-static uint8_t  stats_channel_quality = 95;
 
 static uint8_t  last_channel = 255;
 static uint32_t last_hop = 0xFFFFFFFF;
@@ -161,18 +156,7 @@ static inline void set_current_channel(uint32_t hop) {
         radio.setChannel(ch);
         last_channel = ch;
         stats_current_ch = ch;
-        int idx = ch - CHANNEL_BASE;
-        if (idx >= 0 && idx < NUM_CHANNELS) {
-            stats_channel_quality = channel_scores[idx];
-        }
     }
-}
-
-bool is_anchor_channel(uint8_t ch) {
-    for (int i = 0; i < NUM_ANCHOR_CHANNELS; i++) {
-        if (ANCHOR_CHANNELS[i] == ch) return true;
-    }
-    return false;
 }
 
 void broadcast_sync(uint32_t hop, uint32_t master_ts) {
@@ -191,56 +175,21 @@ void broadcast_sync(uint32_t hop, uint32_t master_ts) {
     frame_fill_crc(&f, PAYLOAD_LEN);
 
     radio.stopListening();
-    // Multi-Tier PMER: Alternate between regular hop channel and anchor rendezvous channel
-    if ((hop % 8) == 0) {
-        uint8_t anchor_ch = ANCHOR_CHANNELS[(hop / 8) % NUM_ANCHOR_CHANNELS];
-        radio.setChannel(anchor_ch);
-        radio.write(&f, MAX_FRAME_LEN);
-        radio.setChannel(stats_current_ch);
-    } else {
-        radio.write(&f, MAX_FRAME_LEN);
-    }
+    radio.write(&f, MAX_FRAME_LEN);
     radio.startListening();
 }
-
-static uint32_t blacklist_hop[NUM_CHANNELS] = {0}; // Hop index when channel was blacklisted
-#define MAX_BLACKLISTED_CHANNELS 30
 
 void scan_jammer() {
     bool carrier = radio.testCarrier();
     uint8_t ch = radio.getChannel();
     if (ch >= CHANNEL_BASE && ch < CHANNEL_BASE + NUM_CHANNELS) {
         int idx = ch - CHANNEL_BASE;
-        
-        // 1. Check if an already blacklisted channel has cooled down (Aging: 200 hops = 5 seconds)
-        if (blacklist_get(blacklist, ch)) {
-            if (stats_current_hop - blacklist_hop[idx] > 200) {
-                blacklist_clear(blacklist, ch);
-                stats_blacklist_count = blacklist_count(blacklist);
-                channel_scores[idx] = 80; // Restored to clean pool
-                jam_counts[idx] = 0;
-                Serial.print(F("[NODE_B] UN-BLACKLISTED channel "));
-                Serial.print(ch);
-                Serial.print(F(" after 5s cooldown (Active: "));
-                Serial.print(stats_blacklist_count);
-                Serial.println(F(")"));
-            }
-            return;
-        }
-
-        // Never blacklist PMER Anchor rendezvous channels
-        if (is_anchor_channel(ch)) return;
-
-        // 2. Detect Persistent Jamming (Require 12 distinct persistent carrier hits)
         if (carrier) {
             jam_counts[idx]++;
-            if (channel_scores[idx] >= 5) channel_scores[idx] -= 5;
-            if (jam_counts[idx] >= 12 && !blacklist_get(blacklist, ch) && (stats_blacklist_count < MAX_BLACKLISTED_CHANNELS)) {
+            if (jam_counts[idx] >= 5 && !blacklist_get(blacklist, ch)) {
                 blacklist_set(blacklist, ch);
-                blacklist_hop[idx] = stats_current_hop;
                 stats_blacklist_count = blacklist_count(blacklist);
-                channel_scores[idx] = 0;
-                Serial.print(F("[NODE_B] 🚨 RF JAMMER DETECTED -> Blacklisted channel "));
+                Serial.print(F("[NODE_B] JAMMER DETECTED -> Blacklisted channel "));
                 Serial.print(ch);
                 Serial.print(F(" (total: "));
                 Serial.print(stats_blacklist_count);
@@ -249,12 +198,11 @@ void scan_jammer() {
             }
         } else {
             if (jam_counts[idx] > 0) jam_counts[idx]--;
-            if (channel_scores[idx] < 100) channel_scores[idx] += 1; // Self-healing
         }
     }
 }
 
-// ---------------- Embedded Web Portal (Live Dashboard) ----------------
+// ---------------- Embedded Web Portal (Live Auto-Refresh) ----------------
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -273,14 +221,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
   .stat-box { background: #1a243b; padding: 10px; border-radius: 8px; border: 1px solid #2a3a5e; }
   .stat-label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
-  .stat-val { font-size: 16px; font-weight: 700; color: #f8fafc; font-family: monospace; margin-top: 2px; }
+  .stat-val { font-size: 17px; font-weight: 700; color: #f8fafc; font-family: monospace; margin-top: 2px; }
   .msg-list { list-style: none; max-height: 200px; overflow-y: auto; }
   .msg-item { background: #1a243b; border-left: 3px solid #f59e0b; padding: 8px 10px; margin-bottom: 6px; border-radius: 4px; font-size: 13px; display: flex; justify-content: space-between; }
   .msg-item.rev { border-left-color: #06b6d4; }
   .empty { color: #64748b; font-size: 13px; text-align: center; padding: 12px 0; }
   .live-dot { width: 8px; height: 8px; background: #f59e0b; border-radius: 50%; display: inline-block; margin-right: 6px; animation: pulse 1.5s infinite; }
-  .bar-container { background: #0b0f19; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 4px; }
-  .bar-fill { height: 100%; background: #f59e0b; transition: width 0.3s; }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 </style>
 </head>
@@ -292,10 +238,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <div class="title">HOPPERNET NODE B</div>
         <div style="font-size:12px;color:#94a3b8;margin-top:2px;">SSID: hopperb &bull; 192.168.4.1</div>
       </div>
-      <div class="badge">MASTER PLL CLOCK</div>
+      <div class="badge">MASTER CLOCK</div>
     </div>
     
-    <!-- PS Dependency Metrics Grid -->
     <div class="grid">
       <div class="stat-box">
         <div class="stat-label">CHANNEL / FREQ</div>
@@ -314,14 +259,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <div class="stat-val" id="val-rev-buf" style="color:#06b6d4;">0 pk</div>
       </div>
       <div class="stat-box">
-        <div class="stat-label">RELAY PDR (QUALITY)</div>
-        <div class="stat-val" id="val-pdr" style="color:#34d399;">100.0%</div>
-        <div class="bar-container"><div id="bar-pdr" class="bar-fill" style="width:100%;background:#34d399;"></div></div>
+        <div class="stat-label">DELIVERED (A &rarr; C)</div>
+        <div class="stat-val" id="val-fwd-del" style="color:#34d399;">0</div>
       </div>
       <div class="stat-box">
         <div class="stat-label">JAMMER BLACKLIST</div>
         <div class="stat-val" id="val-jam" style="color:#ef4444;">0 ch</div>
-        <div class="bar-container"><div id="bar-jam" class="bar-fill" style="width:0%;background:#ef4444;"></div></div>
       </div>
     </div>
   </div>
@@ -349,13 +292,8 @@ async function fetchStatus() {
     document.getElementById('val-hop').textContent = '#' + d.hop;
     document.getElementById('val-fwd-buf').textContent = d.fwd_buf + ' pk';
     document.getElementById('val-rev-buf').textContent = d.rev_buf + ' pk';
-    document.getElementById('val-pdr').textContent = d.pdr.toFixed(1) + '%';
-    document.getElementById('bar-pdr').style.width = d.pdr + '%';
-    
+    document.getElementById('val-fwd-del').textContent = d.fwd_delivered + ' (rev: ' + d.rev_delivered + ')';
     document.getElementById('val-jam').textContent = d.jam_count + ' ch';
-    let jamPct = Math.min(100, Math.round((d.jam_count / 124) * 100));
-    document.getElementById('bar-jam').style.width = jamPct + '%';
-
     document.getElementById('relay-status').textContent = 'Total Relayed: ' + (d.fwd_delivered + d.rev_delivered);
 
     if (d.history_count !== lastHistoryCount) {
@@ -401,9 +339,6 @@ void handleApiStatus() {
     json += "\"ssid\":\"" NODE_B_SSID "\",";
     json += "\"ch\":" + String(stats_current_ch) + ",";
     json += "\"hop\":" + String(stats_current_hop) + ",";
-    json += "\"rssi\":" + String(stats_rssi_dbm) + ",";
-    json += "\"pdr\":" + String(stats_pdr, 1) + ",";
-    json += "\"channel_quality\":" + String(stats_channel_quality) + ",";
     json += "\"fwd_buf\":" + String(fq_count) + ",";
     json += "\"rev_buf\":" + String(rq_count) + ",";
     json += "\"jam_count\":" + String(stats_blacklist_count) + ",";
@@ -435,24 +370,19 @@ void setup() {
     Serial.println(F("  HopperNet NODE B — Relay (SSID: hopperb)"));
     Serial.println(F("=========================================="));
 
-    // Initialize Channel Quality Map
-    for (int i = 0; i < NUM_CHANNELS; i++) {
-        channel_scores[i] = 100;
-    }
-
-    // 1. SoftAP Setup (75% Power — Balanced Range & Low Thermal Impact)
+    // 1. SoftAP Setup (Isolated Channel 6, 75% Power)
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(false);
-    WiFi.setTxPower(WIFI_POWER_15dBm); // 75% Power (~31.6mW) — strong multi-room coverage & safe thermals
+    WiFi.setTxPower(WIFI_POWER_15dBm);
     IPAddress local_IP(192, 168, 4, 1);
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
     WiFi.softAP(NODE_B_SSID, WIFI_PASS_COMMON, 6, 0, 4);
 
-    Serial.print(F("[WIFI] Access Point (75% POWER): "));
+    Serial.print(F("[WIFI] Access Point: "));
     Serial.println(NODE_B_SSID);
     Serial.println(F("[WIFI] Web Portal: http://192.168.4.1"));
 
@@ -538,15 +468,12 @@ void loop() {
             radio.read(&rx, MAX_FRAME_LEN);
             if (frame_valid(&rx, PAYLOAD_LEN) && rx.type == FRAME_TYPE_DATA && rx.src == NODE_SRC) {
                 stats_recv_total++;
-                bool rpd = radio.testRPD();
-                stats_rssi_dbm = rpd ? -60 : -75;
-
                 uint8_t plen = rx.payload[0];
                 char msg[25] = {0};
                 if (plen > PAYLOAD_LEN - 1) plen = PAYLOAD_LEN - 1;
                 memcpy(msg, &rx.payload[1], plen);
 
-                // Duplicate Filter
+                // Prevent duplicates from same seq
                 if (last_seen_seq_a[rx.seq] == 0) {
                     last_seen_seq_a[rx.seq] = 1;
                     fwd_push(NODE_SRC, NODE_DST, rx.seq, msg, plen);
@@ -557,9 +484,7 @@ void loop() {
                     Serial.print(msg);
                     Serial.print(F("\" (FwdBuf: "));
                     Serial.print(fq_count);
-                    Serial.print(F(" | RSSI: "));
-                    Serial.print(stats_rssi_dbm);
-                    Serial.println(F(" dBm)"));
+                    Serial.println(F(")"));
                 }
 
                 // Immediate ACK back to Node A
@@ -622,9 +547,6 @@ void loop() {
             if (got_ack) {
                 fwd_pop();
                 stats_fwd_delivered++;
-                if (stats_recv_total > 0) {
-                    stats_pdr = ((float)stats_fwd_delivered / (float)stats_recv_total) * 100.0f;
-                }
                 Serial.print(F("[NODE_B] FWD DELIVERED to C seq="));
                 Serial.print(pkt.seq);
                 Serial.print(F(" (Remaining Buf: "));
@@ -728,7 +650,7 @@ void loop() {
         }
     }
 
-    // 4. Jammer Carrier Scan Window [23.5ms, 25ms) — executed strictly ONCE per hop
+    // 4. Jammer Carrier Scan Window [23.5ms, 25ms)
     static uint32_t last_scan_hop = 0xFFFFFFFF;
     if (phase >= 23500 && hop != last_scan_hop) {
         last_scan_hop = hop;
