@@ -1,5 +1,5 @@
 // HopperNet Node A — Source Endpoint (ESP32)
-// Dual-Mode: SoftAP ("hoppera") + USB Serial + Slotted FHSS Radio Mesh
+// 100% Local & Cloudless: Slotted FHSS Mesh + Live Auto-Refreshing Web Portal
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -12,52 +12,58 @@
 // ---------------- Hardware & Role Config ----------------
 #define ROLE            NODE_A
 #define RELAY           NODE_B
-#define PEER            NODE_C
+#define DEST            NODE_C
 #define BAUD            115200
 
 #define QUEUE_SIZE      32
+#define HISTORY_SIZE    10
 
-// ---------------- Node State ----------------
 RF24 radio(RF_CE_PIN, RF_CSN_PIN);
 WebServer server(80);
 
-static int32_t clock_offset = 0;
-static uint8_t synced = 0;
-static uint8_t blacklist[BLACKLIST_SIZE];
-static uint8_t rx_blacklist[BLACKLIST_SIZE];
+// ---------------- State Variables ----------------
+static uint8_t  blacklist[BLACKLIST_SIZE];
+static uint8_t  rx_blacklist[BLACKLIST_SIZE];
+static uint8_t  last_channel = 255;
+static uint8_t  scan_ch = CHANNEL_BASE;
 static uint32_t rx_hop_index = 0;
 static uint32_t rx_master_ts = 0;
-static uint8_t scan_ch = 0;
-static uint8_t last_channel = 255;
+static int32_t  clock_offset = 0;
+static uint8_t  synced = 0;
+static uint32_t last_sync_time_ms = 0;
+static uint8_t  seq_counter = 1;
 
-// Stats
-static uint8_t seq_counter = 0;
+// Telemetry Stats
 static uint32_t stats_sent = 0;
 static uint32_t stats_acked = 0;
 static uint32_t stats_received = 0;
-static uint8_t  stats_current_ch = 0;
 static uint32_t stats_current_hop = 0;
+static uint8_t  stats_current_ch = 0;
 
-// Outbound Message Queue (from Web/Serial to Node C)
+// Message Buffers
 struct OutboundMsg {
     char text[PAYLOAD_LEN];
     uint8_t len;
 };
-static OutboundMsg out_queue[QUEUE_SIZE];
-static int oq_head = 0, oq_tail = 0, oq_count = 0;
 
-// Inbound Message History (Received from Node C)
 struct InboundMsg {
-    uint8_t seq;
-    uint8_t hop;
     char text[PAYLOAD_LEN];
+    uint8_t seq;
+    uint32_t hop;
+    unsigned long timestamp_ms;
 };
-static InboundMsg in_history[16];
-static int ih_count = 0;
+
+static OutboundMsg out_queue[QUEUE_SIZE];
+static volatile int oq_head = 0;
+static volatile int oq_tail = 0;
+static volatile int oq_count = 0;
+
+static InboundMsg in_history[HISTORY_SIZE];
+static volatile int ih_count = 0;
 
 bool out_push(const char *text, uint8_t len) {
     if (oq_count < QUEUE_SIZE) {
-        memset(&out_queue[oq_head], 0, sizeof(OutboundMsg));
+        memset(out_queue[oq_head].text, 0, PAYLOAD_LEN);
         out_queue[oq_head].len = (len < PAYLOAD_LEN) ? len : (PAYLOAD_LEN - 1);
         memcpy(out_queue[oq_head].text, text, out_queue[oq_head].len);
         oq_head = (oq_head + 1) % QUEUE_SIZE;
@@ -67,20 +73,27 @@ bool out_push(const char *text, uint8_t len) {
     return false;
 }
 
-bool out_pop(OutboundMsg *out) {
+bool out_peek(OutboundMsg *out) {
     if (oq_count > 0) {
         *out = out_queue[oq_tail];
-        oq_tail = (oq_tail + 1) % QUEUE_SIZE;
-        oq_count--;
         return true;
     }
     return false;
 }
 
-void in_record(uint8_t seq, uint8_t hop, const char *text) {
-    int idx = ih_count % 16;
+void out_pop() {
+    if (oq_count > 0) {
+        oq_tail = (oq_tail + 1) % QUEUE_SIZE;
+        oq_count--;
+    }
+}
+
+void in_record(uint8_t seq, uint32_t hop, const char *text) {
+    int idx = ih_count % HISTORY_SIZE;
     in_history[idx].seq = seq;
     in_history[idx].hop = hop;
+    in_history[idx].timestamp_ms = millis();
+    memset(in_history[idx].text, 0, PAYLOAD_LEN);
     strncpy(in_history[idx].text, text, PAYLOAD_LEN - 1);
     ih_count++;
 }
@@ -94,51 +107,232 @@ static inline void set_current_channel(uint32_t hop) {
     }
 }
 
-// ---------------- On-Board HTTP Server ----------------
-void handleRoot() {
-    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>HopperNet Node A</title><style>body{background:#090d16;color:#f9fafb;font-family:sans-serif;padding:20px;text-align:center;}.card{background:#111827;border:1px solid #243044;border-radius:10px;padding:20px;max-width:400px;margin:auto;}input,button{padding:10px;border-radius:6px;margin:5px;border:none;font-size:16px;}input{background:#1f293d;color:#fff;width:80%;}button{background:#0ea5e9;color:#fff;cursor:pointer;font-weight:bold;}.stat{display:flex;justify-content:space-between;margin:8px 0;font-family:monospace;color:#38bdf8;}</style></head><body>";
-    html += "<div class='card'><h2>HOPPERNET NODE A</h2><p style='color:#9ca3af;'>SSID: " NODE_A_SSID "</p><hr style='border-color:#243044;margin:15px 0;'>";
-    html += "<div class='stat'><span>SYNC STATUS:</span><span>" + String(synced ? "LOCKED" : "SCANNING") + "</span></div>";
-    html += "<div class='stat'><span>CHANNEL:</span><span>CH " + String(stats_current_ch) + "</span></div>";
-    html += "<div class='stat'><span>HOP:</span><span>" + String(stats_current_hop) + "</span></div>";
-    html += "<div class='stat'><span>SENT / RCVD:</span><span>" + String(stats_sent) + " / " + String(stats_received) + "</span></div>";
-    html += "<form method='POST' action='/send'><input type='text' name='msg' placeholder='Type message...' maxlength='23'><br><button type='submit'>TRANSMIT (A &rarr; C)</button></form></div></body></html>";
-    server.send(200, "text/html", html);
+// ---------------- Embedded Web Portal (Live Auto-Refresh) ----------------
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HopperNet — Node A (Source)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0b0f19; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 16px; }
+  .container { max-width: 480px; margin: 0 auto; }
+  .card { background: #131b2e; border: 1px solid #23304d; border-radius: 12px; padding: 18px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+  .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #23304d; padding-bottom: 10px; margin-bottom: 12px; }
+  .title { font-size: 18px; font-weight: 700; color: #38bdf8; letter-spacing: 0.5px; }
+  .badge { font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 20px; text-transform: uppercase; }
+  .badge-locked { background: #065f46; color: #34d399; }
+  .badge-scan { background: #854d0e; color: #facc15; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .stat-box { background: #1a243b; padding: 10px; border-radius: 8px; border: 1px solid #2a3a5e; }
+  .stat-label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-val { font-size: 17px; font-weight: 700; color: #f8fafc; font-family: monospace; margin-top: 2px; }
+  .input-row { display: flex; gap: 8px; margin-top: 8px; }
+  input[type="text"] { flex: 1; background: #1a243b; border: 1px solid #2a3a5e; color: #f8fafc; padding: 12px; border-radius: 8px; font-size: 15px; outline: none; }
+  input[type="text"]:focus { border-color: #38bdf8; }
+  button { background: #0284c7; color: #fff; border: none; padding: 12px 18px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+  button:active { background: #0369a1; }
+  .msg-list { list-style: none; max-height: 180px; overflow-y: auto; }
+  .msg-item { background: #1a243b; border-left: 3px solid #38bdf8; padding: 8px 10px; margin-bottom: 6px; border-radius: 4px; font-size: 13px; display: flex; justify-content: space-between; }
+  .msg-item.rx { border-left-color: #34d399; }
+  .empty { color: #64748b; font-size: 13px; text-align: center; padding: 12px 0; }
+  .live-dot { width: 8px; height: 8px; background: #34d399; border-radius: 50%; display: inline-block; margin-right: 6px; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <div class="header">
+      <div>
+        <div class="title">HOPPERNET NODE A</div>
+        <div style="font-size:12px;color:#94a3b8;margin-top:2px;">SSID: hoppera &bull; 192.168.4.1</div>
+      </div>
+      <div id="sync-badge" class="badge badge-scan">SCANNING</div>
+    </div>
+    
+    <div class="grid">
+      <div class="stat-box">
+        <div class="stat-label">CHANNEL / FREQ</div>
+        <div class="stat-val" id="val-ch">CH --</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">MASTER HOP</div>
+        <div class="stat-val" id="val-hop">#0</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">SENT (A &rarr; B)</div>
+        <div class="stat-val" id="val-sent" style="color:#38bdf8;">0</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">RETURN RECV</div>
+        <div class="stat-val" id="val-recv" style="color:#34d399;">0</div>
+      </div>
+    </div>
+
+    <div style="font-size:12px;font-weight:600;color:#94a3b8;margin-bottom:6px;text-transform:uppercase;">Transmit Alert (A &rarr; B &rarr; C)</div>
+    <form id="send-form" onsubmit="sendMsg(event)">
+      <div class="input-row">
+        <input type="text" id="msg-input" placeholder="Type message..." maxlength="23" autocomplete="off" required>
+        <button type="submit" id="send-btn">TRANSMIT</button>
+      </div>
+    </form>
+    <div id="send-status" style="font-size:12px;color:#38bdf8;margin-top:6px;min-height:16px;"></div>
+  </div>
+
+  <div class="card">
+    <div class="header" style="margin-bottom:8px;">
+      <div style="font-size:14px;font-weight:600;color:#cbd5e1;"><span class="live-dot"></span>LIVE MESSAGE FEED</div>
+      <div id="queue-status" style="font-size:12px;color:#94a3b8;">Outbound Queue: 0</div>
+    </div>
+    <div id="msg-feed" class="msg-list">
+      <div class="empty">No return messages received yet.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let lastHistoryCount = -1;
+
+async function fetchStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const d = await res.json();
+    
+    const badge = document.getElementById('sync-badge');
+    if (d.synced) {
+      badge.className = 'badge badge-locked';
+      badge.textContent = 'LOCKED';
+    } else {
+      badge.className = 'badge badge-scan';
+      badge.textContent = 'SCANNING';
+    }
+    
+    document.getElementById('val-ch').textContent = 'CH ' + d.ch + ' (' + (2400 + d.ch) + 'M)';
+    document.getElementById('val-hop').textContent = '#' + d.hop;
+    document.getElementById('val-sent').textContent = d.sent + ' (' + d.acked + ' ack)';
+    document.getElementById('val-recv').textContent = d.received;
+    document.getElementById('queue-status').textContent = 'Outbound Queue: ' + d.out_queue;
+
+    if (d.history_count !== lastHistoryCount) {
+      lastHistoryCount = d.history_count;
+      renderMessages(d.history);
+    }
+  } catch(e) {}
 }
 
-void handleSend() {
-    if (server.hasArg("msg")) {
-        String msg = server.arg("msg");
-        out_push(msg.c_str(), msg.length());
+function renderMessages(history) {
+  const feed = document.getElementById('msg-feed');
+  if (!history || history.length === 0) {
+    feed.innerHTML = '<div class="empty">No return messages received yet.</div>';
+    return;
+  }
+  let html = '';
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    html += '<div class="msg-item rx"><div><strong>' + escapeHtml(m.text) + '</strong></div><div style="font-family:monospace;font-size:11px;color:#94a3b8;">#' + m.seq + ' (Hop ' + m.hop + ')</div></div>';
+  }
+  feed.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+async function sendMsg(e) {
+  e.preventDefault();
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text) return;
+  
+  const statusDiv = document.getElementById('send-status');
+  statusDiv.textContent = 'Queueing message for FHSS hop...';
+  
+  try {
+    const res = await fetch('/api/send', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'msg=' + encodeURIComponent(text)
+    });
+    if (res.ok) {
+      input.value = '';
+      statusDiv.textContent = '✓ Queued! Transmitting to Node B on next slot.';
+      setTimeout(() => { statusDiv.textContent = ''; }, 3000);
+      fetchStatus();
     }
-    server.sendHeader("Location", "/");
-    server.send(303);
+  } catch(err) {
+    statusDiv.textContent = 'Error sending message.';
+  }
+}
+
+setInterval(fetchStatus, 400);
+fetchStatus();
+</script>
+</body>
+</html>
+)rawliteral";
+
+void handleRoot() {
+    server.send_P(200, "text/html", INDEX_HTML);
 }
 
 void handleApiStatus() {
-    String json = "{\"node\":\"node_a\",\"ssid\":\"" NODE_A_SSID "\",\"synced\":" + String(synced ? "true" : "false") + ",\"ch\":" + String(stats_current_ch) + ",\"hop\":" + String(stats_current_hop) + ",\"sent\":" + String(stats_sent) + ",\"received\":" + String(stats_received) + ",\"acked\":" + String(stats_acked) + "}";
+    String json = "{";
+    json += "\"node\":\"node_a\",";
+    json += "\"synced\":" + String(synced ? "true" : "false") + ",";
+    json += "\"ch\":" + String(stats_current_ch) + ",";
+    json += "\"hop\":" + String(stats_current_hop) + ",";
+    json += "\"sent\":" + String(stats_sent) + ",";
+    json += "\"acked\":" + String(stats_acked) + ",";
+    json += "\"received\":" + String(stats_received) + ",";
+    json += "\"out_queue\":" + String(oq_count) + ",";
+    json += "\"history_count\":" + String(ih_count) + ",";
+    json += "\"history\":[";
+    
+    int count = (ih_count < HISTORY_SIZE) ? ih_count : HISTORY_SIZE;
+    int start = (ih_count < HISTORY_SIZE) ? 0 : (ih_count % HISTORY_SIZE);
+    
+    for (int i = 0; i < count; i++) {
+        int idx = (start + i) % HISTORY_SIZE;
+        if (i > 0) json += ",";
+        json += "{\"seq\":" + String(in_history[idx].seq) + ",";
+        json += "\"hop\":" + String(in_history[idx].hop) + ",";
+        json += "\"text\":\"" + String(in_history[idx].text) + "\"}";
+    }
+    json += "]}";
     server.send(200, "application/json", json);
 }
 
 void handleApiSend() {
-    if (server.hasArg("plain")) {
-        String body = server.arg("plain");
-        out_push(body.c_str(), body.length());
+    String msg = "";
+    if (server.hasArg("msg")) {
+        msg = server.arg("msg");
+    } else if (server.hasArg("plain")) {
+        msg = server.arg("plain");
+    }
+
+    if (msg.length() > 0) {
+        out_push(msg.c_str(), msg.length());
+        Serial.print(F("[NODE_A] WEB QUEUED: \""));
+        Serial.print(msg);
+        Serial.println(F("\""));
         server.send(200, "application/json", "{\"status\":\"queued\"}");
     } else {
-        server.send(400, "text/plain", "Missing message body");
+        server.send(400, "application/json", "{\"error\":\"empty message\"}");
     }
 }
 
 // ---------------- Setup ----------------
 void setup() {
     Serial.begin(BAUD);
-    delay(1000);
+    delay(500);
     Serial.println(F("=========================================="));
     Serial.println(F("  HopperNet NODE A — Source (SSID: hoppera)"));
     Serial.println(F("=========================================="));
 
-    // 1. Start SoftAP with explicit IP configuration
+    // 1. SoftAP Setup
     WiFi.disconnect(true);
     delay(100);
     WiFi.mode(WIFI_AP);
@@ -146,17 +340,13 @@ void setup() {
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_IP, gateway, subnet);
-    bool ap_ok = WiFi.softAP(NODE_A_SSID, WIFI_PASS_COMMON, 1, 0, 4);
+    WiFi.softAP(NODE_A_SSID, WIFI_PASS_COMMON, 1, 0, 4);
 
-    Serial.print(F("[WIFI] Access Point ("));
-    Serial.print(NODE_A_SSID);
-    Serial.print(F("): "));
-    Serial.println(ap_ok ? F("STARTED SUCCESSFULLY") : F("FAILED TO START"));
-    Serial.print(F("[WIFI] Web Portal IP: http://"));
-    Serial.println(WiFi.softAPIP());
+    Serial.print(F("[WIFI] Access Point: "));
+    Serial.println(NODE_A_SSID);
+    Serial.println(F("[WIFI] Web Portal: http://192.168.4.1"));
 
     server.on("/", handleRoot);
-    server.on("/send", HTTP_POST, handleSend);
     server.on("/api/status", handleApiStatus);
     server.on("/api/send", HTTP_POST, handleApiSend);
     server.begin();
@@ -166,9 +356,9 @@ void setup() {
 
     // 2. Initialize Radio
     if (!radio.begin()) {
-        Serial.println(F("[NODE_A] WARNING: RF24 init FAILED — check nRF24 wiring!"));
+        Serial.println(F("[NODE_A] WARNING: RF24 init FAILED — check wiring!"));
     } else {
-        radio.setPALevel(RF24_PA_LOW);
+        radio.setPALevel(RF24_PA_HIGH);
         radio.setDataRate(RF24_250KBPS);
         radio.setPayloadSize(MAX_FRAME_LEN);
         radio.setAutoAck(false);
@@ -184,7 +374,7 @@ void setup() {
 void loop() {
     server.handleClient();
 
-    // 1. Read Commands from USB Serial (Local Desktop App)
+    // 1. Read Serial Commands from Desktop App
     if (Serial.available()) {
         String input = Serial.readStringUntil('\n');
         input.trim();
@@ -198,7 +388,7 @@ void loop() {
         }
     }
 
-    // 2. Process Received Radio Frames (SYNC, ACKs, Return Data from Node B)
+    // 2. Check for Incoming Radio Frames (SYNC, ACKs, Return Data)
     if (radio.available()) {
         struct fhss_frame f;
         radio.read(&f, MAX_FRAME_LEN);
@@ -210,6 +400,7 @@ void loop() {
 
                 clock_offset = (int32_t)rx_master_ts - (int32_t)micros();
                 blacklist_copy(blacklist, rx_blacklist);
+                last_sync_time_ms = millis();
 
                 if (!synced) {
                     synced = 1;
@@ -219,8 +410,10 @@ void loop() {
                 }
             } else if (f.type == FRAME_TYPE_ACK && f.src == RELAY && f.dst == ROLE) {
                 stats_acked++;
+                out_pop(); // Message was safely received by Node B!
+                Serial.print(F("[NODE_A] ACK RECEIVED from Relay for seq="));
+                Serial.println(f.seq);
             } else if (f.type == FRAME_TYPE_DATA && f.dst == ROLE) {
-                // Return packet from Node C via Relay
                 stats_received++;
                 uint8_t len = f.payload[0];
                 char msg[25] = {0};
@@ -236,7 +429,7 @@ void loop() {
                 Serial.print(msg);
                 Serial.println(F("\""));
 
-                // Send immediate ACK to Relay
+                // Immediate Return ACK back to Relay
                 struct fhss_frame ack;
                 memset(&ack, 0, sizeof(ack));
                 ack.magic = FHSS_MAGIC;
@@ -246,7 +439,6 @@ void loop() {
                 ack.seq = f.seq;
                 ack.hop_index = f.hop_index;
                 ack.payload[0] = f.seq;
-                ack.payload[1] = 0x0D;
                 frame_fill_crc(&ack, PAYLOAD_LEN);
 
                 radio.stopListening();
@@ -256,7 +448,13 @@ void loop() {
         }
     }
 
-    // If unsynced: Park on each channel for 80 ms to guarantee catching Node B's 25ms hops!
+    // Sync Timeout Watchdog (Re-enter scan mode if no SYNC beacon for 2.5s)
+    if (synced && (millis() - last_sync_time_ms > 2500)) {
+        synced = 0;
+        Serial.println(F("[NODE_A] SYNC LOST — Returning to channel scan..."));
+    }
+
+    // If Unsynced: Park on each channel for 80ms to catch the master beacon
     static uint32_t last_scan_switch_ms = 0;
     if (!synced) {
         if (millis() - last_scan_switch_ms >= 80) {
@@ -267,6 +465,7 @@ void loop() {
         return;
     }
 
+    // 3. Synced Execution: Hop in exact lockstep
     uint32_t now_master = (uint32_t)((int32_t)micros() + clock_offset);
     uint32_t hop = now_master / DWELL_US;
     uint32_t phase = now_master % DWELL_US;
@@ -274,20 +473,20 @@ void loop() {
 
     set_current_channel(hop);
 
-    // 3. Transmit Window: Forward Slot [2ms, 7ms)
+    // 4. Forward Transmit Window: [2.5ms, 7.5ms)
     static uint32_t last_tx_hop = 0xFFFFFFFF;
-    if (phase >= PHASE_SYNC_US && phase < 7000 && hop != last_tx_hop) {
+    if (phase >= 2500 && phase < 7500 && hop != last_tx_hop) {
         last_tx_hop = hop;
 
         OutboundMsg outMsg;
-        if (out_pop(&outMsg)) {
+        if (out_peek(&outMsg)) {
             struct fhss_frame tx;
             memset(&tx, 0, sizeof(tx));
             tx.magic = FHSS_MAGIC;
             tx.type = FRAME_TYPE_DATA;
             tx.src = ROLE;
             tx.dst = RELAY;
-            tx.seq = seq_counter++;
+            tx.seq = seq_counter;
             tx.hop_index = (uint8_t)(hop & 0xFF);
             tx.flags = FLAG_ACK_REQ;
             tx.payload[0] = outMsg.len;
@@ -299,9 +498,11 @@ void loop() {
             stats_sent++;
             radio.startListening();
 
-            Serial.print(F("[NODE_A] TX FORWARD seq="));
-            Serial.print(tx.seq);
-            Serial.print(F(" data=\""));
+            Serial.print(F("[NODE_A] TX FORWARD hop="));
+            Serial.print(hop);
+            Serial.print(F(" seq="));
+            Serial.print(seq_counter);
+            Serial.print(F(" text=\""));
             Serial.print(outMsg.text);
             Serial.println(F("\""));
         }
