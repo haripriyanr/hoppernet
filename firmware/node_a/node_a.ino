@@ -1,14 +1,15 @@
 // HopperNet Node A — Source Endpoint (ESP32)
-// 100% Local & Cloudless: Direct USB Serial + Slotted FHSS Radio Mesh
+// Dual-Mode: SoftAP ("hoppera") + USB Serial + Slotted FHSS Radio Mesh
 
 #include <Arduino.h>
 #include <SPI.h>
 #include <RF24.h>
+#include <WiFi.h>
+#include <WebServer.h>
 #include "fhss.h"
+#include "fhss_config.h"
 
 // ---------------- Hardware & Role Config ----------------
-#define RF_CE_PIN       4
-#define RF_CSN_PIN      5
 #define ROLE            NODE_A
 #define RELAY           NODE_B
 #define PEER            NODE_C
@@ -18,6 +19,8 @@
 
 // ---------------- Node State ----------------
 RF24 radio(RF_CE_PIN, RF_CSN_PIN);
+WebServer server(80);
+
 static int32_t clock_offset = 0;
 static uint8_t synced = 0;
 static uint8_t blacklist[BLACKLIST_SIZE];
@@ -35,13 +38,22 @@ static uint32_t stats_received = 0;
 static uint8_t  stats_current_ch = 0;
 static uint32_t stats_current_hop = 0;
 
-// Outbound Message Queue (from Serial to Node C)
+// Outbound Message Queue (from Web/Serial to Node C)
 struct OutboundMsg {
     char text[PAYLOAD_LEN];
     uint8_t len;
 };
 static OutboundMsg out_queue[QUEUE_SIZE];
 static int oq_head = 0, oq_tail = 0, oq_count = 0;
+
+// Inbound Message History (Received from Node C)
+struct InboundMsg {
+    uint8_t seq;
+    uint8_t hop;
+    char text[PAYLOAD_LEN];
+};
+static InboundMsg in_history[16];
+static int ih_count = 0;
 
 bool out_push(const char *text, uint8_t len) {
     if (oq_count < QUEUE_SIZE) {
@@ -65,6 +77,14 @@ bool out_pop(OutboundMsg *out) {
     return false;
 }
 
+void in_record(uint8_t seq, uint8_t hop, const char *text) {
+    int idx = ih_count % 16;
+    in_history[idx].seq = seq;
+    in_history[idx].hop = hop;
+    strncpy(in_history[idx].text, text, PAYLOAD_LEN - 1);
+    ih_count++;
+}
+
 static inline void set_current_channel(uint32_t hop) {
     uint8_t ch = channel_for_hop(hop, FHSS_SEED, blacklist);
     if (ch != last_channel) {
@@ -74,13 +94,63 @@ static inline void set_current_channel(uint32_t hop) {
     }
 }
 
+// ---------------- On-Board HTTP Server ----------------
+void handleRoot() {
+    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>HopperNet Node A</title><style>body{background:#090d16;color:#f9fafb;font-family:sans-serif;padding:20px;text-align:center;}.card{background:#111827;border:1px solid #243044;border-radius:10px;padding:20px;max-width:400px;margin:auto;}input,button{padding:10px;border-radius:6px;margin:5px;border:none;font-size:16px;}input{background:#1f293d;color:#fff;width:80%;}button{background:#0ea5e9;color:#fff;cursor:pointer;font-weight:bold;}.stat{display:flex;justify-content:space-between;margin:8px 0;font-family:monospace;color:#38bdf8;}</style></head><body>";
+    html += "<div class='card'><h2>HOPPERNET NODE A</h2><p style='color:#9ca3af;'>SSID: " NODE_A_SSID "</p><hr style='border-color:#243044;margin:15px 0;'>";
+    html += "<div class='stat'><span>SYNC STATUS:</span><span>" + String(synced ? "LOCKED" : "SCANNING") + "</span></div>";
+    html += "<div class='stat'><span>CHANNEL:</span><span>CH " + String(stats_current_ch) + "</span></div>";
+    html += "<div class='stat'><span>HOP:</span><span>" + String(stats_current_hop) + "</span></div>";
+    html += "<div class='stat'><span>SENT / RCVD:</span><span>" + String(stats_sent) + " / " + String(stats_received) + "</span></div>";
+    html += "<form method='POST' action='/send'><input type='text' name='msg' placeholder='Type message...' maxlength='23'><br><button type='submit'>TRANSMIT (A &rarr; C)</button></form></div></body></html>";
+    server.send(200, "text/html", html);
+}
+
+void handleSend() {
+    if (server.hasArg("msg")) {
+        String msg = server.arg("msg");
+        out_push(msg.c_str(), msg.length());
+    }
+    server.sendHeader("Location", "/");
+    server.send(303);
+}
+
+void handleApiStatus() {
+    String json = "{\"node\":\"node_a\",\"ssid\":\"" NODE_A_SSID "\",\"synced\":" + String(synced ? "true" : "false") + ",\"ch\":" + String(stats_current_ch) + ",\"hop\":" + String(stats_current_hop) + ",\"sent\":" + String(stats_sent) + ",\"received\":" + String(stats_received) + ",\"acked\":" + String(stats_acked) + "}";
+    server.send(200, "application/json", json);
+}
+
+void handleApiSend() {
+    if (server.hasArg("plain")) {
+        String body = server.arg("plain");
+        out_push(body.c_str(), body.length());
+        server.send(200, "application/json", "{\"status\":\"queued\"}");
+    } else {
+        server.send(400, "text/plain", "Missing message body");
+    }
+}
+
 // ---------------- Setup ----------------
 void setup() {
     Serial.begin(BAUD);
     delay(1000);
     Serial.println(F("=========================================="));
-    Serial.println(F("  HopperNet NODE A — Source Endpoint      "));
+    Serial.println(F("  HopperNet NODE A — Source (SSID: hoppera)"));
     Serial.println(F("=========================================="));
+
+    // Start SoftAP
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(NODE_A_SSID, WIFI_PASS_COMMON);
+    Serial.print(F("[WIFI] Access Point Started: "));
+    Serial.println(NODE_A_SSID);
+    Serial.print(F("[WIFI] Web Portal IP: http://"));
+    Serial.println(WiFi.softAPIP());
+
+    server.on("/", handleRoot);
+    server.on("/send", HTTP_POST, handleSend);
+    server.on("/api/status", handleApiStatus);
+    server.on("/api/send", HTTP_POST, handleApiSend);
+    server.begin();
 
     blacklist_clear_all(blacklist);
     blacklist_clear_all(rx_blacklist);
@@ -101,7 +171,9 @@ void setup() {
 
 // ---------------- Loop ----------------
 void loop() {
-    // 1. Read Commands / Messages from USB Serial (Local App)
+    server.handleClient();
+
+    // 1. Read Commands from USB Serial (Local Desktop App)
     if (Serial.available()) {
         String input = Serial.readStringUntil('\n');
         input.trim();
@@ -143,6 +215,7 @@ void loop() {
                 if (len > PAYLOAD_LEN - 1) len = PAYLOAD_LEN - 1;
                 memcpy(msg, &f.payload[1], len);
 
+                in_record(f.seq, f.hop_index, msg);
                 Serial.print(F("[NODE_A] RECV RETURN hop="));
                 Serial.print(f.hop_index);
                 Serial.print(F(" seq="));

@@ -1,11 +1,13 @@
 // HopperNet Node B — Master Relay & Dual-Direction Edge Buffer (ESP32)
-// Hardware: ESP32 DevKit + nRF24L01+ (NO LCD)
-// 100% Local & Cloudless: 520 KB RAM + 4 MB Flash Storage
+// Dual-Mode: SoftAP ("hopperb") + USB Serial + Slotted FHSS Radio Mesh
 
 #include <Arduino.h>
 #include <SPI.h>
 #include <RF24.h>
+#include <WiFi.h>
+#include <WebServer.h>
 #include "fhss.h"
+#include "fhss_config.h"
 
 // ---------------- Hardware & Pin Config (ESP32) ----------------
 #define RF_CE_PIN       4
@@ -18,8 +20,10 @@
 
 #define BUFFER_MAX_ITEMS 256
 
-// ---------------- Radio State ----------------
+// ---------------- Radio & Server State ----------------
 RF24 radio(RF_CE_PIN, RF_CSN_PIN);
+WebServer server(80);
+
 static uint8_t blacklist[BLACKLIST_SIZE];
 static uint32_t hop_counter = 0;
 static uint32_t last_hop = 0xFFFFFFFF;
@@ -165,7 +169,7 @@ void scan_jammer() {
                 stats_blacklist_count = blacklist_count(blacklist);
                 Serial.print(F("[NODE_B] JAMMER DETECTED -> Blacklisted channel "));
                 Serial.print(ch);
-                Serial.print(F(" (total blacklisted: "));
+                Serial.print(F(" (total: "));
                 Serial.print(stats_blacklist_count);
                 Serial.println(F(")"));
                 jam_counts[idx] = 0;
@@ -176,13 +180,43 @@ void scan_jammer() {
     }
 }
 
+// ---------------- Web Portal Handlers ----------------
+void handleRoot() {
+    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>HopperNet Node B (Relay)</title><style>body{background:#090d16;color:#f9fafb;font-family:sans-serif;padding:20px;text-align:center;}.card{background:#111827;border:1px solid #243044;border-radius:10px;padding:20px;max-width:400px;margin:auto;}.stat{display:flex;justify-content:space-between;margin:8px 0;font-family:monospace;color:#f59e0b;}</style></head><body>";
+    html += "<div class='card'><h2>HOPPERNET NODE B (RELAY)</h2><p style='color:#9ca3af;'>SSID: " NODE_B_SSID "</p><hr style='border-color:#243044;margin:15px 0;'>";
+    html += "<div class='stat'><span>MASTER CLOCK:</span><span>ACTIVE</span></div>";
+    html += "<div class='stat'><span>CHANNEL / HOP:</span><span>CH " + String(stats_current_ch) + " / #" + String(stats_current_hop) + "</span></div>";
+    html += "<div class='stat'><span>FORWARD BUFFER (A&rarr;C):</span><span>" + String(fq_count) + " pk</span></div>";
+    html += "<div class='stat'><span>REVERSE BUFFER (C&rarr;A):</span><span>" + String(rq_count) + " pk</span></div>";
+    html += "<div class='stat'><span>JAMMED CHANNELS:</span><span>" + String(stats_blacklist_count) + "</span></div>";
+    html += "<div class='stat'><span>DELIVERED (FWD/REV):</span><span>" + String(stats_fwd_delivered) + " / " + String(stats_rev_delivered) + "</span></div></div></body></html>";
+    server.send(200, "text/html", html);
+}
+
+void handleApiStatus() {
+    String json = "{\"node\":\"node_b\",\"ssid\":\"" NODE_B_SSID "\",\"ch\":" + String(stats_current_ch) + ",\"hop\":" + String(stats_current_hop) + ",\"fwd_buf\":" + String(fq_count) + ",\"rev_buf\":" + String(rq_count) + ",\"jam_count\":" + String(stats_blacklist_count) + ",\"fwd_delivered\":" + String(stats_fwd_delivered) + ",\"rev_delivered\":" + String(stats_rev_delivered) + "}";
+    server.send(200, "application/json", json);
+}
+
 // ---------------- Setup ----------------
 void setup() {
     Serial.begin(BAUD);
     delay(1000);
     Serial.println(F("=========================================="));
-    Serial.println(F("  HopperNet NODE B — Relay (ESP32)        "));
+    Serial.println(F("  HopperNet NODE B — Relay (SSID: hopperb)"));
     Serial.println(F("=========================================="));
+
+    // Start SoftAP
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(NODE_B_SSID, WIFI_PASS_COMMON);
+    Serial.print(F("[WIFI] Access Point Started: "));
+    Serial.println(NODE_B_SSID);
+    Serial.print(F("[WIFI] Web Portal IP: http://"));
+    Serial.println(WiFi.softAPIP());
+
+    server.on("/", handleRoot);
+    server.on("/api/status", handleApiStatus);
+    server.begin();
 
     blacklist_clear_all(blacklist);
     memset(jam_counts, 0, sizeof(jam_counts));
@@ -203,6 +237,8 @@ void setup() {
 
 // ---------------- Loop ----------------
 void loop() {
+    server.handleClient();
+
     uint32_t now_us = micros();
     uint32_t hop = now_us / DWELL_US;
     uint32_t phase = now_us % DWELL_US;
@@ -401,7 +437,7 @@ void loop() {
         scan_jammer();
     }
 
-    // Periodic telemetry log to serial monitor every 1 second
+    // Periodic serial log
     if (millis() - last_log_ms >= 1000) {
         last_log_ms = millis();
         Serial.print(F("[NODE_B] CH:"));
