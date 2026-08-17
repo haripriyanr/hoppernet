@@ -562,6 +562,22 @@ void backgroundTaskCore0(void *pvParameters) {
             }
         }
 
+        // 1-Second Serial COM Telemetry Output (Readable in Serial Monitor)
+        static uint32_t lastSerialTelemetryMs = 0;
+        if (millis() - lastSerialTelemetryMs >= 1000) {
+            lastSerialTelemetryMs = millis();
+            uint8_t snap_matched = display_matched_count;
+            if (snap_matched == 0 && synced && (millis() - lastSyncMs < 2000)) {
+                snap_matched = HOPS_PER_SEC;
+            }
+            uint8_t pct = (snap_matched * 100) / HOPS_PER_SEC;
+            Serial.printf("TELEMETRY|NODE_C|SYNC=%s|RATE=%u/%u(%u%%)|CH=%u|SF=%lu|SENT=%lu|RECV=%lu\n",
+                          synced ? "LOCKED" : "SCAN",
+                          snap_matched, HOPS_PER_SEC, pct,
+                          currentChannel, (unsigned long)currentSF,
+                          (unsigned long)stats_sent, (unsigned long)stats_received);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }

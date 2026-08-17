@@ -169,22 +169,9 @@ void receiveDownlink(uint32_t sf) {
             if (d.src == NODE_B && d.dst == NODE_A && d.type == FT_DATA && d.len <= DATA_PLAINTEXT_MAX) {
                 uint8_t plain[8] = {0};
                 if (gcmDecrypt(d.ciphertext, d.len, d.tag, plain, NODE_C, NODE_A, d.sf, d.msgId, d.frag)) {
-                    stats_received++;
-                    char text[16] = {0};
-                    memcpy(text, plain, d.len);
+                    static uint16_t last_delivered_return_msgId = 0;
 
-                    portENTER_CRITICAL(&queueMux);
-                    int idx = ih_count % HISTORY_SIZE;
-                    in_history[idx].msgId = d.msgId;
-                    in_history[idx].sf = d.sf;
-                    in_history[idx].timestamp_ms = millis();
-                    strncpy(in_history[idx].text, (char*)plain, 15);
-                    ih_count++;
-                    portEXIT_CRITICAL(&queueMux);
-
-                    Serial.printf("[NODE_A] RX RETURN msg=%u data=\"%s\"\n", d.msgId, text);
-
-                    // Immediate Delivery ACK back to Relay
+                    // Immediate Delivery ACK back to Relay (always send so Node B clears custody)
                     AckFrame ack{};
                     ack.magic = SP_MAGIC;
                     ack.version = SP_VERSION;
@@ -199,6 +186,27 @@ void receiveDownlink(uint32_t sf) {
                     tune(ch);
                     txFrame(radio, &ack);
                     stats_delivered++;
+
+                    // Drop duplicate if this message was already received
+                    if (d.msgId <= last_delivered_return_msgId && last_delivered_return_msgId != 0) {
+                        continue;
+                    }
+                    last_delivered_return_msgId = d.msgId;
+
+                    stats_received++;
+                    char text[16] = {0};
+                    memcpy(text, plain, d.len);
+
+                    portENTER_CRITICAL(&queueMux);
+                    int idx = ih_count % HISTORY_SIZE;
+                    in_history[idx].msgId = d.msgId;
+                    in_history[idx].sf = d.sf;
+                    in_history[idx].timestamp_ms = millis();
+                    strncpy(in_history[idx].text, (char*)plain, 15);
+                    ih_count++;
+                    portEXIT_CRITICAL(&queueMux);
+
+                    Serial.printf("[NODE_A] RX RETURN msg=%u data=\"%s\"\n", d.msgId, text);
                 }
             }
         }
@@ -512,6 +520,22 @@ void backgroundTaskCore0(void *pvParameters) {
                 String msg = input.substring(5);
                 queueText(msg.c_str());
             }
+        }
+
+        // 1-Second Serial COM Telemetry Output (Readable in Serial Monitor)
+        static uint32_t lastSerialTelemetryMs = 0;
+        if (millis() - lastSerialTelemetryMs >= 1000) {
+            lastSerialTelemetryMs = millis();
+            uint8_t snap_matched = display_matched_count;
+            if (snap_matched == 0 && synced && (millis() - lastSyncMs < 2000)) {
+                snap_matched = HOPS_PER_SEC;
+            }
+            uint8_t pct = (snap_matched * 100) / HOPS_PER_SEC;
+            Serial.printf("TELEMETRY|NODE_A|SYNC=%s|RATE=%u/%u(%u%%)|CH=%u|SF=%lu|SENT=%lu|RECV=%lu\n",
+                          synced ? "LOCKED" : "SCAN",
+                          snap_matched, HOPS_PER_SEC, pct,
+                          currentChannel, (unsigned long)currentSF,
+                          (unsigned long)stats_sent, (unsigned long)stats_received);
         }
 
         vTaskDelay(pdMS_TO_TICKS(5));
