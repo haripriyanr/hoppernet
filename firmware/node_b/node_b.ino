@@ -1,19 +1,15 @@
 // HopperNet Node B — Master Relay & Dual-Direction Edge Buffer (ESP32)
-// Hardware: ESP32 DevKit + nRF24L01+ + 16x2 I2C LCD (SDA: GPIO 21, SCL: GPIO 22)
+// Hardware: ESP32 DevKit + nRF24L01+ (NO LCD)
 // 100% Local & Cloudless: 520 KB RAM + 4 MB Flash Storage
 
 #include <Arduino.h>
 #include <SPI.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 #include <RF24.h>
 #include "fhss.h"
 
 // ---------------- Hardware & Pin Config (ESP32) ----------------
 #define RF_CE_PIN       4
 #define RF_CSN_PIN      5
-#define LCD_SDA_PIN     21
-#define LCD_SCL_PIN     22
 
 #define ROLE            NODE_B
 #define NODE_SRC        NODE_A
@@ -22,10 +18,7 @@
 
 #define BUFFER_MAX_ITEMS 256
 
-// ---------------- LCD & Radio State ----------------
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-bool lcd_available = false;
-
+// ---------------- Radio State ----------------
 RF24 radio(RF_CE_PIN, RF_CSN_PIN);
 static uint8_t blacklist[BLACKLIST_SIZE];
 static uint32_t hop_counter = 0;
@@ -41,7 +34,7 @@ static uint16_t stats_buffer_total = 0;
 static uint8_t  stats_blacklist_count = 0;
 static uint8_t  stats_current_ch = 0;
 static uint32_t stats_current_hop = 0;
-static uint32_t last_lcd_update_ms = 0;
+static uint32_t last_log_ms = 0;
 
 // Deduplication
 static uint8_t last_seen_seq_a[256] = {0};
@@ -172,7 +165,7 @@ void scan_jammer() {
                 stats_blacklist_count = blacklist_count(blacklist);
                 Serial.print(F("[NODE_B] JAMMER DETECTED -> Blacklisted channel "));
                 Serial.print(ch);
-                Serial.print(F(" (total: "));
+                Serial.print(F(" (total blacklisted: "));
                 Serial.print(stats_blacklist_count);
                 Serial.println(F(")"));
                 jam_counts[idx] = 0;
@@ -183,47 +176,19 @@ void scan_jammer() {
     }
 }
 
-void update_lcd() {
-    if (!lcd_available) return;
-    char line0[17];
-    char line1[17];
-    snprintf(line0, sizeof(line0), "CH:%-3u  HOP:%-5lu", stats_current_ch, (unsigned long)(stats_current_hop % 100000));
-    snprintf(line1, sizeof(line1), "F:%u R:%u JAM:%-2u", fq_count, rq_count, stats_blacklist_count);
-
-    lcd.setCursor(0, 0);
-    lcd.print(line0);
-    lcd.setCursor(0, 1);
-    lcd.print(line1);
-}
-
 // ---------------- Setup ----------------
 void setup() {
     Serial.begin(BAUD);
     delay(1000);
     Serial.println(F("=========================================="));
-    Serial.println(F(" HopperNet NODE B — Relay (ESP32 + LCD)   "));
+    Serial.println(F("  HopperNet NODE B — Relay (ESP32)        "));
     Serial.println(F("=========================================="));
 
     blacklist_clear_all(blacklist);
     memset(jam_counts, 0, sizeof(jam_counts));
 
-    // Initialize 16x2 I2C LCD on ESP32 SDA(21), SCL(22)
-    Wire.begin(LCD_SDA_PIN, LCD_SCL_PIN);
-    lcd.init();
-    lcd.backlight();
-    lcd.setCursor(0, 0);
-    lcd.print(F("MEDRELAY ESP-B  "));
-    lcd.setCursor(0, 1);
-    lcd.print(F("BOOTING MESH... "));
-    lcd_available = true;
-    delay(800);
-
     if (!radio.begin()) {
         Serial.println(F("[NODE_B] RF24 init FAILED — check wiring!"));
-        if (lcd_available) {
-            lcd.clear();
-            lcd.print(F("RF24 INIT FAILED"));
-        }
         while (1) delay(100);
     }
 
@@ -234,7 +199,6 @@ void setup() {
     radio.startListening();
 
     Serial.println(F("[NODE_B] Mesh ready. Starting bidirectional master clock..."));
-    if (lcd_available) lcd.clear();
 }
 
 // ---------------- Loop ----------------
@@ -437,9 +401,18 @@ void loop() {
         scan_jammer();
     }
 
-    // Non-blocking LCD refresh every 200 ms
-    if (millis() - last_lcd_update_ms >= 200) {
-        last_lcd_update_ms = millis();
-        update_lcd();
+    // Periodic telemetry log to serial monitor every 1 second
+    if (millis() - last_log_ms >= 1000) {
+        last_log_ms = millis();
+        Serial.print(F("[NODE_B] CH:"));
+        Serial.print(stats_current_ch);
+        Serial.print(F(" HOP:"));
+        Serial.print(stats_current_hop);
+        Serial.print(F(" FWD_BUF:"));
+        Serial.print(fq_count);
+        Serial.print(F(" REV_BUF:"));
+        Serial.print(rq_count);
+        Serial.print(F(" JAM:"));
+        Serial.println(stats_blacklist_count);
     }
 }
