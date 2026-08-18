@@ -181,17 +181,20 @@ void sendSync() {
     s.sf = sfNow;
     s.mapVersion = mapVersion;
     memcpy(s.blacklist, blacklist, BLACKLIST_BYTES);
-    s.masterUs = micros();
+    s.masterUs16 = (uint16_t)(micros() & 0xFFFF);
+    s.bp_fwd = (qACCount >= 48) ? 1 : 0;
+    s.bp_rev = (qCACount >= 48) ? 1 : 0;
+
     uint8_t syncCh = getSyncChannel(sfNow);
     tune(syncCh);
     bool ok = txFrame(radio, &s);
     if (syncCh != RF_CHANNEL_SYNC) {
         tune(RF_CHANNEL_SYNC);
-        s.masterUs = micros();
+        s.masterUs16 = (uint16_t)(micros() & 0xFFFF);
         ok = txFrame(radio, &s) || ok;
     }
-    if ((sfNow & 0x1F) == 0) {
-        Serial.printf("SYNC|B|sf=%lu|ch=%u|recovery=1|tx=%d\n", (unsigned long)sfNow, syncCh, (int)ok);
+    if ((sfNow & 0xFF) == 0) {
+        Serial.printf("SYNC|B|sf=%lu|ch=%u|recovery=1|tx=%d|bp_fwd=%u|bp_rev=%u\n", (unsigned long)sfNow, syncCh, (int)ok, s.bp_fwd, s.bp_rev);
     }
 }
 
@@ -207,16 +210,18 @@ void sendAck(uint8_t dst, uint32_t sf, uint16_t msgId, uint8_t frag, uint8_t typ
     a.frag = frag;
     a.code = (type == FT_DELIVERY ? 2 : 1);
     a.masterUs = micros();
+    a.bp_fwd = (qACCount >= 48) ? 1 : 0;
+    a.bp_rev = (qCACount >= 48) ? 1 : 0;
     txFrame(radio, &a);
 }
 
-void receiveFromA() {
+void receiveFromA(uint32_t slotStart) {
     uint8_t ch = hopChannel(sfNow, FHSS_SEED_AB, blacklist);
     tune(ch);
-    uint32_t deadline = micros() + 11500;
+    uint32_t deadline = slotStart + SUPERFRAME_US - SLOT_GUARD_US;
     while ((int32_t)(micros() - deadline) < 0) {
         if (!radio.available()) {
-            delayMicroseconds(10);
+            delayMicroseconds(5);
             continue;
         }
         uint8_t raw[32];
@@ -248,13 +253,13 @@ void receiveFromA() {
     }
 }
 
-void receiveFromC() {
+void receiveFromC(uint32_t slotStart) {
     uint8_t ch = hopChannel(sfNow, FHSS_SEED_BC, blacklist);
     tune(ch);
-    uint32_t deadline = micros() + 9000;
+    uint32_t deadline = slotStart + SUPERFRAME_US - SLOT_GUARD_US;
     while ((int32_t)(micros() - deadline) < 0) {
         if (!radio.available()) {
-            delayMicroseconds(50);
+            delayMicroseconds(5);
             continue;
         }
         uint8_t raw[32];
@@ -265,7 +270,6 @@ void receiveFromC() {
 
         rxC++;
         lastCDeliveryMs = millis();
-        // Check for duplicate fragment
         if (d.msgId == last_seen_msgId_c && d.frag == last_seen_frag_c) {
             sendAck(NODE_C, sfNow, d.msgId, d.frag, FT_CUSTODY);
             Serial.printf("HANDSHAKE|B|DUP_ACK|dir=C->B|msg=%u|frag=%u|sf=%lu\n", d.msgId, d.frag, (unsigned long)sfNow);
@@ -316,7 +320,7 @@ static bool abandonHead(QueueItem *q, volatile uint8_t &tail, volatile uint8_t &
 }
 
 bool forwardOne(QueueItem *q, volatile uint8_t &tail, volatile uint8_t &count,
-                uint8_t dst, uint32_t seed, bool forwardToC) {
+                uint8_t dst, uint32_t seed, bool forwardToC, uint32_t slotStart) {
     if (!count) return false;
     DataFrame f;
     if (!qPeek(q, tail, count, f)) return false;
@@ -339,11 +343,11 @@ bool forwardOne(QueueItem *q, volatile uint8_t &tail, volatile uint8_t &count,
         return false;
     }
 
-    uint32_t end = micros() + DELIVERY_ACK_WAIT_US;
+    uint32_t end = slotStart + SUPERFRAME_US - SLOT_GUARD_US;
     bool delivered = false;
     while ((int32_t)(micros() - end) < 0) {
         if (!radio.available()) {
-            delayMicroseconds(40);
+            delayMicroseconds(5);
             continue;
         }
         uint8_t raw[32];
@@ -370,17 +374,42 @@ bool forwardOne(QueueItem *q, volatile uint8_t &tail, volatile uint8_t &count,
     return delivered;
 }
 
-static void drainQueue(QueueItem *q, volatile uint8_t &tail, volatile uint8_t &count,
-                       uint32_t budgetUs, uint8_t maxItems,
-                       uint8_t dst, uint32_t seed, bool forwardToC) {
-    uint32_t end = micros() + budgetUs;
-    uint8_t sent = 0;
-    while (count && sent < maxItems && sent < MAX_DRAIN_PER_WINDOW &&
-           (int32_t)(micros() + 5000 - end) < 0) {
-        uint8_t before = count;
-        bool delivered = forwardOne(q, tail, count, dst, seed, forwardToC);
-        sent++;
-        if (!delivered && count == before) break;
+static void forwardToC(uint32_t slotStart) {
+    if (qACCount) {
+        forwardOne(qAC, qACTail, qACCount, NODE_C, FHSS_SEED_BC, true, slotStart);
+    }
+}
+
+static void forwardToA(uint32_t slotStart) {
+    if (qCACount) {
+        forwardOne(qCA, qCATail, qCACount, NODE_A, FHSS_SEED_AB, false, slotStart);
+    }
+}
+
+static void maintainSpectrum() {
+    static uint32_t lastProbeSF = 0;
+    if (sfNow - lastProbeSF >= 10) {
+        lastProbeSF = sfNow;
+        int16_t forced = forcedProbeChannel;
+        uint8_t probe = forced >= RF_CHANNEL_FIRST && forced <= RF_CHANNEL_LAST
+            ? (uint8_t)forced
+            : (uint8_t)(RF_CHANNEL_FIRST + (mix32(sfNow * 0x9E37u) % RF_CHANNEL_COUNT));
+        tune(probe);
+        delayMicroseconds(50);
+        if (radio.testCarrier()) {
+            scoreJammerEnergy(probe);
+        } else {
+            scoreSuccess(probe);
+        }
+    }
+
+    static uint32_t lastDecaySF = 0;
+    if (sfNow - lastDecaySF >= 200) {
+        lastDecaySF = sfNow;
+        for (uint8_t ch = RF_CHANNEL_FIRST; ch <= RF_CHANNEL_LAST; ch++) {
+            uint8_t i = ch - RF_CHANNEL_FIRST;
+            if (badStreak[i] > 0) badStreak[i]--;
+        }
     }
 }
 
@@ -833,7 +862,7 @@ void setup() {
     memset(goodStreak, 0, sizeof(goodStreak));
     lastCDeliveryMs = millis();
 
-    for (int i = 0; i < HOPS_PER_SEC; i++) {
+    for (int i = 0; i < DISPLAY_HOPS_SEC; i++) {
         sec_hops[i].channel = hopChannel(i, FHSS_SEED_AB, blacklist);
         sec_hops[i].matched = 1;
         display_hops[i] = sec_hops[i];
@@ -841,7 +870,7 @@ void setup() {
 
     // 3. Initialize Radio
     if (radioCommonBegin(radio)) {
-        Serial.println(F("[NODE_B] RF24 initialized at 2Mbps. 50ms master clock with dual-sync beacon."));
+        Serial.println(F("[NODE_B] RF24 initialized at 2Mbps. 625us master clock (1600 hops/sec) with ChaCha20-Poly1305."));
     } else {
         Serial.println(F("[NODE_B] RF24 INIT FAILED. Check 3.3V, CE=4, CSN=5, SPI=18/19/23."));
     }
@@ -858,76 +887,51 @@ void setup() {
     );
 }
 
-// ---------------- Real-Time 50 ms Superframe Loop (Core 1) ----------------
+// ---------------- Real-Time 625 us Micro-Slot Loop (Core 1) ----------------
 void loop() {
-    uint32_t now = micros();
-    sfNow = now / SUPERFRAME_US;
-    uint32_t phase = now % SUPERFRAME_US;
+    uint32_t slotStart = micros();
+    uint8_t slot = microSlot(sfNow);
 
-    // Slot 0 (0-4 ms): Broadcast Sync Beacon on Rotating Anchor + Rendezvous Channel 0
-    static uint32_t lastSF = 0xFFFFFFFFUL;
-    if (sfNow != lastSF) {
-        lastSF = sfNow;
-        sendSync();
+    switch (slot) {
+        case SLOT_SYNC:
+            sendSync();
+            break;
+        case SLOT_AB_RX:
+            receiveFromA(slotStart);
+            break;
+        case SLOT_BC_TX:
+            forwardToC(slotStart);
+            break;
+        case SLOT_BC_RX:
+            receiveFromC(slotStart);
+            break;
+        case SLOT_AB_TX:
+            forwardToA(slotStart);
+            break;
+        case SLOT_MAINT:
+            maintainSpectrum();
+            break;
+    }
 
-        uint8_t slot = (uint8_t)(sfNow % HOPS_PER_SEC);
-        sec_hops[slot].channel = hopChannel(sfNow, FHSS_SEED_AB, blacklist);
-        sec_hops[slot].matched = 1;
+    // Update spectrum hop stream for WebUI (sampled periodically)
+    uint8_t dispSlot = (uint8_t)(sfNow % DISPLAY_HOPS_SEC);
+    sec_hops[dispSlot].channel = currentChannel;
+    sec_hops[dispSlot].matched = 1;
 
-        if (slot == 0 && sfNow > last_sec_boundary_sf) {
-            last_sec_boundary_sf = sfNow;
-            portENTER_CRITICAL(&queueMux);
-            for (int i = 0; i < HOPS_PER_SEC; i++) {
-                display_hops[i] = sec_hops[i];
-            }
-            display_matched_count = HOPS_PER_SEC;
-            portEXIT_CRITICAL(&queueMux);
+    if (dispSlot == 0 && sfNow > last_sec_boundary_sf) {
+        last_sec_boundary_sf = sfNow;
+        portENTER_CRITICAL(&queueMux);
+        for (int i = 0; i < DISPLAY_HOPS_SEC; i++) {
+            display_hops[i] = sec_hops[i];
         }
+        display_matched_count = DISPLAY_HOPS_SEC;
+        portEXIT_CRITICAL(&queueMux);
     }
 
-    // Slot 1 (4-16 ms): A -> B Forward Path
-    if (phase >= AB_RX_START && phase < BC_TX_START) {
-        receiveFromA();
-    }
-    // Slot 2 (16-28 ms): B -> C Forward Drain
-    else if (phase >= BC_TX_START && phase < BC_RX_START) {
-        drainQueue(qAC, qACTail, qACCount, 10500, 2, NODE_C, FHSS_SEED_BC, true);
-    }
-    // Slot 3 (28-40 ms): C -> B Return Path
-    else if (phase >= BC_RX_START && phase < AB_TX_START) {
-        receiveFromC();
-    }
-    // Slot 4 (40-48 ms): B -> A Return Drain
-    else if (phase >= AB_TX_START && phase < GUARD_START) {
-        drainQueue(qCA, qCATail, qCACount, 7000, 2, NODE_A, FHSS_SEED_AB, false);
-    }
-    // Slot 5 (48-50 ms): Guard / RPD Probe
-    else if (phase >= GUARD_START) {
-        static uint32_t lastProbeSF = 0;
-        if (sfNow - lastProbeSF >= 10) {
-            lastProbeSF = sfNow;
-            int16_t forced = forcedProbeChannel;
-            uint8_t probe = forced >= RF_CHANNEL_FIRST && forced <= RF_CHANNEL_LAST
-                ? (uint8_t)forced
-                : (uint8_t)(RF_CHANNEL_FIRST + (mix32(sfNow * 0x9E37u) % RF_CHANNEL_COUNT));
-            tune(probe);
-            delayMicroseconds(100);
-            if (radio.testCarrier()) {
-                scoreJammerEnergy(probe);
-            } else {
-                scoreSuccess(probe);
-            }
-        }
-
-        static uint32_t lastDecaySF = 0;
-        if (sfNow - lastDecaySF >= 200) {
-            lastDecaySF = sfNow;
-            for (uint8_t ch = RF_CHANNEL_FIRST; ch <= RF_CHANNEL_LAST; ch++) {
-                uint8_t i = ch - RF_CHANNEL_FIRST;
-                if (badStreak[i] > 0) badStreak[i]--;
-            }
-        }
+    // Precision dwell pacing for 625us slot
+    while ((int32_t)(micros() - (slotStart + SUPERFRAME_US)) < 0) {
+        // Microsecond spin
     }
 
-    delayMicroseconds(50);
+    sfNow++;
 }

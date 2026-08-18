@@ -18,6 +18,7 @@
 #define QUEUE_MAX       32
 #define HISTORY_SIZE    10
 #define SYNC_LOSS_TIMEOUT_MS 30000UL
+#define TX_QUEUE_SIZE   32
 
 RF24 radio(RF_CE_PIN, RF_CSN_PIN);
 WebServer server(80);
@@ -36,6 +37,7 @@ static volatile uint32_t lastSyncMs = 0;
 static volatile uint32_t currentSF = 0;
 static volatile uint16_t mapVersion = 1;
 static volatile uint8_t  currentChannel = RF_CHANNEL_SYNC;
+static volatile uint8_t  lastBpRev = 0; // Dynamic reverse backpressure from Relay B (0=OK, 1=Throttled)
 
 static uint32_t lastRxSF = 0xFFFFFFFFUL;
 
@@ -58,6 +60,15 @@ static uint32_t lastTxSF = 0xFFFFFFFFUL;
 static volatile bool loopSendEnabled = false;
 static volatile uint32_t loopSent = 0;
 static volatile uint32_t loopDropped = 0;
+
+struct TxItem {
+    char text[256];
+    bool critical;
+};
+static TxItem   txQueue[TX_QUEUE_SIZE];
+static uint8_t  txQueueHead = 0;
+static uint8_t  txQueueTail = 0;
+static uint8_t  txQueueCount = 0;
 
 // Link-Down Simulation
 static volatile bool simLinkDown = false;
@@ -112,29 +123,51 @@ static inline void tune(uint8_t ch) {
         setRadioChannel(radio, ch);
         currentChannel = ch;
     }
-}
-
-void queueReply(const char *s, bool critical = false) {
-    if (!s || !*s) return;
-    portENTER_CRITICAL(&queueMux);
-    size_t n = strlen(s);
-    if (n > sizeof(txMessage) - 1) n = sizeof(txMessage) - 1;
-    memcpy(txMessage, s, n);
-    txMessage[n] = '\0';
-    txMessageLen = n;
-    txCritical = critical;
+}static void startNextReplyLocked() {
+    if (txQueueCount == 0) return;
+    memcpy(txMessage, txQueue[txQueueTail].text, sizeof(txMessage));
+    txCritical = txQueue[txQueueTail].critical;
+    txQueueTail = (txQueueTail + 1) % TX_QUEUE_SIZE;
+    txQueueCount--;
+    txMessageLen = strlen(txMessage);
     txMsgId = nextMsgId++;
     txFrag = 0;
     txTotal = (uint8_t)((txMessageLen + DATA_PLAINTEXT_MAX - 1) / DATA_PLAINTEXT_MAX);
     if (txTotal == 0) txTotal = 1;
+}
+
+bool queueReply(const char *s, bool critical = false) {
+    if (!s) return false;
+    size_t n = strlen(s);
+    if (n == 0 || n >= sizeof(txMessage)) return false;
+    bool accepted = false;
+    portENTER_CRITICAL(&queueMux);
+    if (txMessageLen == 0 && txQueueCount == 0) {
+        memcpy(txMessage, s, n + 1);
+        txMessageLen = n;
+        txCritical = critical;
+        txMsgId = nextMsgId++;
+        txFrag = 0;
+        txTotal = (uint8_t)((txMessageLen + DATA_PLAINTEXT_MAX - 1) / DATA_PLAINTEXT_MAX);
+        if (txTotal == 0) txTotal = 1;
+        accepted = true;
+    } else if (txQueueCount < TX_QUEUE_SIZE) {
+        memcpy(txQueue[txQueueHead].text, s, n + 1);
+        txQueue[txQueueHead].critical = critical;
+        txQueueHead = (txQueueHead + 1) % TX_QUEUE_SIZE;
+        txQueueCount++;
+        accepted = true;
+    }
     portEXIT_CRITICAL(&queueMux);
-    Serial.printf("[NODE_C] QUEUED RETURN: msg=%u, bytes=%u, frags=%u, critical=%s\n", txMsgId, txMessageLen, txTotal, critical ? "yes" : "no");
+    Serial.printf("[NODE_C] QUEUED RETURN: bytes=%u, pending=%u\n", (unsigned)n, txQueueCount);
+    return accepted;
 }
 
 void handleAck(const AckFrame &a) {
     if (!validHeader(a.magic, a.version, a.type, a.src, a.dst) || a.dst != NODE_C) return;
     if (a.type == FT_CUSTODY && a.msgId == txMsgId && a.frag == txFrag) {
         stats_custody++;
+        lastBpRev = a.bp_rev;
         if (a.masterUs > 0) {
             clockOffsetUs = (int32_t)a.masterUs - (int32_t)micros();
             synced = true;
@@ -146,6 +179,9 @@ void handleAck(const AckFrame &a) {
             txMessageLen = 0;
             txFrag = 0;
             txTotal = 0;
+            portENTER_CRITICAL(&queueMux);
+            startNextReplyLocked();
+            portEXIT_CRITICAL(&queueMux);
         }
     }
 }
@@ -169,18 +205,17 @@ void sendFragment(uint32_t sf) {
     f.flags = DATA_FLAG_E2E | (txCritical ? DATA_FLAG_CRITICAL : 0);
     f.len = len;
 
-    if (!gcmEncrypt((uint8_t*)txMessage + off, len, f.ciphertext, f.tag, NODE_C, NODE_A, sf, txMsgId, txFrag)) return;
+    if (!chachaEncrypt((uint8_t*)txMessage + off, len, f.ciphertext, f.tag, NODE_C, NODE_A, sf, txMsgId, txFrag)) return;
     uint8_t ch = hopChannel(sf, FHSS_SEED_BC, blacklist);
     tune(ch);
 
     uint32_t txStart = micros();
     if (txFrame(radio, &f)) {
         stats_sent++;
-        // Fast turnaround RX in same slot for Custody ACK from Node B
-        uint32_t deadline = micros() + 4500;
+        uint32_t deadline = micros() + (SUPERFRAME_US - SLOT_GUARD_US - 200);
         while ((int32_t)(micros() - deadline) < 0) {
             if (!radio.available()) {
-                delayMicroseconds(10);
+                delayMicroseconds(5);
                 continue;
             }
             uint8_t raw[32];
@@ -222,7 +257,7 @@ void handleSync(const SyncFrame &s) {
 
     if (synced && lastSyncLocal != 0) {
         uint32_t elapsedSf = s.sf - lastSyncSf;
-        if (elapsedSf > 0 && elapsedSf < 100) {
+        if (elapsedSf > 0 && elapsedSf < 1000) {
             uint32_t expectedLocalDelta = elapsedSf * SUPERFRAME_US;
             uint32_t actualLocalDelta = local - lastSyncLocal;
             int32_t driftUs = (int32_t)actualLocalDelta - (int32_t)expectedLocalDelta;
@@ -234,17 +269,15 @@ void handleSync(const SyncFrame &s) {
     lastSyncLocal = local;
     lastSyncSf = s.sf;
     currentSF = s.sf;
-    if (s.masterUs > 0) {
-        clockOffsetUs = (int32_t)s.masterUs - (int32_t)local;
-    } else {
-        clockOffsetUs = (int32_t)(s.sf * SUPERFRAME_US) - (int32_t)local;
-    }
+    clockOffsetUs = (int32_t)(s.sf * SUPERFRAME_US) - (int32_t)local;
     synced = true;
     lastSyncMs = millis();
+    lastBpRev = s.bp_rev;
+    stats_sync_locked_hops++;
 }
 
 void receiveForward(uint32_t sf) {
-    uint32_t end = micros() + 9000;
+    uint32_t end = micros() + (SUPERFRAME_US - SLOT_GUARD_US);
     while ((int32_t)(micros() - end) < 0) {
         uint8_t raw[32];
         bool have = false;
@@ -257,7 +290,7 @@ void receiveForward(uint32_t sf) {
             have = true;
         }
         if (!have) {
-            delayMicroseconds(50);
+            delayMicroseconds(5);
             continue;
         }
         uint8_t type = raw[3];
@@ -275,7 +308,7 @@ void receiveForward(uint32_t sf) {
         if (d.magic != SP_MAGIC || d.version != SP_VERSION || d.type != FT_DATA || d.src != NODE_B || d.dst != NODE_C || d.len > DATA_PLAINTEXT_MAX) continue;
 
         uint8_t plain[8] = {0};
-        if (!gcmDecrypt(d.ciphertext, d.len, d.tag, plain, NODE_A, NODE_C, d.sf, d.msgId, d.frag)) {
+        if (!chachaDecrypt(d.ciphertext, d.len, d.tag, plain, NODE_A, NODE_C, d.sf, d.msgId, d.frag)) {
             Serial.printf("SECURITY|C|AUTH_FAIL|msg=%u|frag=%u\n", d.msgId, d.frag);
             continue;
         }
@@ -293,10 +326,10 @@ void receiveForward(uint32_t sf) {
         ack.msgId = d.msgId;
         ack.frag = d.frag;
         ack.code = 2;
-        ack.masterUs = micros();
         uint8_t ch = hopChannel(sf, FHSS_SEED_BC, blacklist);
         tune(ch);
         txFrame(radio, &ack);
+        stats_delivered++;;
 
         uint16_t messageAge = (uint16_t)(last_delivered_msgId - d.msgId);
         if (d.msgId == last_delivered_msgId || (messageAge != 0 && messageAge < 0x8000U)) {
@@ -932,14 +965,15 @@ void loop() {
                 Serial.printf("[NODE_C] *** SYNC ACQUIRED on Ch %u *** SF: %lu\n", currentChannel, (unsigned long)currentSF);
             }
         }
-        delayMicroseconds(200);
+        delayMicroseconds(50);
         return;
     }
 
+    serviceLoopSender();
     uint32_t now = logicalUs();
     uint32_t sf = now / SUPERFRAME_US;
-    uint32_t phase = now % SUPERFRAME_US;
     currentSF = sf;
+    uint8_t slot = microSlot(sf);
 
     // Track total hops elapsed
     static uint32_t last_counted_sf = 0xFFFFFFFF;
@@ -948,60 +982,44 @@ void loop() {
         stats_sync_total_hops++;
     }
 
-    // Slot 0 (0-4 ms): Listen for Master SYNC Beacon on Rotating Anchor Channel & Channel 0
-    if (phase < SLOT_SYNC_US) {
-        static uint32_t lastTuneSF = 0xFFFFFFFF;
-        static uint8_t tunedStage = 0;
-        if (lastTuneSF != sf) {
-            lastTuneSF = sf;
-            tunedStage = 1;
+    switch (slot) {
+        case SLOT_SYNC: {
             uint8_t syncCh = getSyncChannel(sf);
             tune(syncCh);
-        } else if (phase >= 1800 && tunedStage == 1) {
-            tunedStage = 2;
-            tune(RF_CHANNEL_SYNC);
-        }
-
-        if (radio.available()) {
-            uint8_t raw[32];
-            radio.read(raw, 32);
-            if (((uint16_t)(raw[0] | (raw[1] << 8)) == SP_MAGIC) && raw[3] == FT_SYNC) {
-                SyncFrame s;
-                memcpy(&s, raw, 32);
-                handleSync(s);
-            } else if (!pending_rx_valid) {
-                memcpy(pending_rx, raw, 32);
-                pending_rx_valid = true;
+            uint32_t endSync = micros() + (SUPERFRAME_US - SLOT_GUARD_US);
+            while ((int32_t)(micros() - endSync) < 0) {
+                if (radio.available()) {
+                    uint8_t raw[32];
+                    radio.read(raw, 32);
+                    if (((uint16_t)(raw[0] | (raw[1] << 8)) == SP_MAGIC) && raw[3] == FT_SYNC) {
+                        SyncFrame s;
+                        memcpy(&s, raw, 32);
+                        handleSync(s);
+                        break;
+                    }
+                }
+                delayMicroseconds(5);
             }
+            break;
         }
-    }
-    // Slot 1: A -> B Forward (Node C idle)
-    else if (phase >= AB_RX_START && phase < BC_TX_START) {
-        // Idle
-    }
-    // Slot 2 (16-28 ms): B -> C Forward Drain Receive
-    else if (phase >= BC_TX_START && phase < BC_RX_START && sf != lastRxSF) {
-        lastRxSF = sf;
-        if (!simLinkDown) {
-            uint8_t ch = hopChannel(sf, FHSS_SEED_BC, blacklist);
-            tune(ch);
-            receiveForward(sf);
+        case SLOT_BC_TX: {
+            if (!simLinkDown && lastRxSF != sf) {
+                lastRxSF = sf;
+                uint8_t ch = hopChannel(sf, FHSS_SEED_BC, blacklist);
+                tune(ch);
+                receiveForward(sf);
+            }
+            break;
         }
-    }
-    // Slot 3 (28-40 ms): C -> B Return Transmit
-    else if (phase >= BC_RX_START && phase < AB_TX_START) {
-        if (!simLinkDown) {
-            uint8_t ch = hopChannel(sf, FHSS_SEED_BC, blacklist);
-            tune(ch);
-            if (lastTxSF != sf) {
+        case SLOT_BC_RX: {
+            if (!simLinkDown && lastTxSF != sf) {
                 sendFragment(sf);
             }
+            break;
         }
-    }
-    // Slot 4 (40-50 ms): B -> A Return Drain (Node C idle)
-    else if (phase >= AB_TX_START) {
-        // Idle
+        default:
+            break;
     }
 
-    delayMicroseconds(50);
+    delayMicroseconds(10);
 }
