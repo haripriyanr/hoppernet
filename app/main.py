@@ -62,33 +62,63 @@ def parse_line(node_conn: NodeConnection, line: str):
     line_upper = line.upper()
 
     # Auto-detection signatures
-    if "NODE A" in line_upper:
+    if "NODE A" in line_upper or "NODE_A" in line_upper:
         node_conn.detected_role = "NODE_A"
-    elif "NODE B" in line_upper:
+    elif "NODE B" in line_upper or "NODE_B" in line_upper:
         node_conn.detected_role = "NODE_B"
-    elif "NODE C" in line_upper:
+    elif "NODE C" in line_upper or "NODE_C" in line_upper:
         node_conn.detected_role = "NODE_C"
     elif "JAMMER" in line_upper:
         node_conn.detected_role = "JAMMER"
 
-    if "SYNC ACQUIRED" in line_upper:
+    if "SYNC ACQUIRED" in line_upper or "SYNC=LOCKED" in line_upper:
         node_conn.stats["synced"] = True
+    elif "SYNC=SCAN" in line_upper or "SCANNING" in line_upper:
+        node_conn.stats["synced"] = False
 
-    # Parse common fields
-    if "CH:" in line_upper or "CH=" in line_upper:
-        try:
-            parts = line.replace(":", " ").replace("=", " ").split()
-            for i, p in enumerate(parts):
-                if p.upper() == "CH" and i + 1 < len(parts):
-                    node_conn.stats["channel"] = int(parts[i + 1])
-                elif p.upper() == "HOP" and i + 1 < len(parts):
-                    node_conn.stats["hop"] = int(parts[i + 1])
-                elif p.upper() in ["BUFFER", "F", "BUF"] and i + 1 < len(parts):
-                    node_conn.stats["buffer_depth"] = int(parts[i + 1])
-                elif p.upper() in ["JAM", "BLACKLIST"] and i + 1 < len(parts):
-                    node_conn.stats["blacklist_count"] = int(parts[i + 1])
-        except Exception:
-            pass
+    if "SIM LINK DOWN" in line_upper:
+        node_conn.stats["link_down"] = True
+    elif "LINK RESTORED" in line_upper:
+        node_conn.stats["link_down"] = False
+
+    # Extract structured key-value metrics (TELEMETRY / HANDSHAKE / STATUS)
+    # Format: KEY=VAL or KEY:VAL
+    try:
+        norm = line.replace("|", " ").replace(",", " ")
+        for token in norm.split():
+            if "=" in token:
+                k, v = token.split("=", 1)
+                k = k.upper()
+                if k == "CH":
+                    node_conn.stats["channel"] = int(v)
+                elif k in ["SENT", "STATS_SENT"]:
+                    node_conn.stats["sent"] = int(v)
+                elif k in ["RECV", "RECEIVED"]:
+                    node_conn.stats["received"] = int(v)
+                elif k in ["DELIVERED", "DEL"]:
+                    node_conn.stats["delivered"] = int(v)
+                elif k in ["CUSTODY", "ACK"]:
+                    node_conn.stats["acked"] = int(v)
+                elif k in ["Q", "FWD_BUF", "BUFFER_DEPTH", "BUF"]:
+                    node_conn.stats["buffer_depth"] = int(v)
+                elif k in ["JAM", "BLACKLIST", "BL"]:
+                    node_conn.stats["blacklist_count"] = int(v)
+                elif k == "SF":
+                    node_conn.stats["hop"] = int(v)
+                elif k == "PCT":
+                    node_conn.stats["sync_pct"] = float(v)
+                elif k == "RPD":
+                    node_conn.stats["rpd"] = v  # "CLEAN" or "HIGH"
+                elif k == "LOSS":
+                    node_conn.stats["loss_pct"] = v  # e.g. "0.0%"
+                elif k == "DRIFT":
+                    node_conn.stats["drift_us"] = v
+                elif k == "AGE":
+                    node_conn.stats["beacon_age_ms"] = v
+                elif k == "RTT":
+                    node_conn.stats["rtt_us"] = v
+    except Exception:
+        pass
 
     return {
         "type": "log",
@@ -196,6 +226,40 @@ async def send_message(req: SendMessageRequest):
     # Broadcast to web app
     await broadcast_ws({"type": "chat_message", "message": entry})
     return {"status": "ok", "entry": entry}
+
+@app.post("/api/node_c/linkdown")
+async def toggle_node_c_linkdown():
+    # Find Node C connection
+    node_c = None
+    for n in active_nodes.values():
+        if n.detected_role == "NODE_C" and n.ser and n.ser.is_open:
+            node_c = n
+            break
+
+    if not node_c:
+        raise HTTPException(status_code=404, detail="Node C device not connected via Serial")
+
+    current_state = node_c.stats.get("link_down", False)
+    new_state = not current_state
+    node_c.stats["link_down"] = new_state
+
+    try:
+        node_c.ser.write(b"CMD:LINKDOWN\n")
+    except Exception as e:
+        print(f"Error sending linkdown command to Node C: {e}")
+
+    await broadcast_ws({
+        "type": "link_down_toggle",
+        "role": "NODE_C",
+        "link_down": new_state
+    })
+
+    return {
+        "status": "ok",
+        "node": "NODE_C",
+        "link_down": new_state,
+        "message": "Node C is now RF-SILENT (Node B buffering)" if new_state else "Node C is now ONLINE (Node B flushing)"
+    }
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

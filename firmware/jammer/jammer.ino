@@ -51,22 +51,23 @@ RF24 radio(CE_PIN, CSN_PIN);
 // ---------------- Jammer Modes ----------------
 enum JammerMode {
     JAM_SPOT = 0,     // Single channel continuous jamming
-    JAM_SWEEP,        // Rapid sweep of all 124 channels
+    JAM_SWEEP,        // Dwell-controlled sweep of all 124 channels
     JAM_RANDOM,       // Random hopping per dwell
-    JAM_AUTOHOP,      // Mirror FHSS algorithm (synchronized tracking)
+    JAM_AUTOHOP,      // Predict the AB FHSS sequence without SYNC capture
     JAM_ADAPTIVE,     // Sniff live carrier energy & target hot channels
     JAM_BURST,        // High-rate microburst pulse jamming
-    JAM_ANCHOR        // Target PMER Rendezvous Anchors {10, 42, 74, 106}
+    JAM_ANCHOR,       // Target current sync anchors {83, 93, 103, 113}
+    JAM_LOCK          // Capture SYNC timing, then jam the selected test channel
 };
 
 static const char* MODE_NAMES[] = {
-    "SPOT", "SWEEP", "RANDOM", "AUTO-HOP", "ADAPTIVE", "BURST", "ANCHOR"
+    "SPOT", "SWEEP", "RANDOM", "AUTO-HOP", "ADAPTIVE", "BURST", "ANCHOR", "LOCK"
 };
 
 // Dwell presets (ms)
 static const int DWELL_PRESETS[] = {5, 10, 15, 25, 50, 100, 200, 500};
 #define NUM_DWELL_PRESETS 8
-static int dwellPresetIdx = 3; // Default 25ms
+static int dwellPresetIdx = 4; // Default 50ms, matching the mesh superframe
 
 // PA Levels
 static const char* PA_NAMES[] = {"MIN", "LOW", "HIGH", "MAX"};
@@ -78,7 +79,7 @@ bool jamming = false;
 bool paused = false;
 JammerMode mode = JAM_SPOT;
 int currentChannel = 45;
-int dwellTime = 25;
+int dwellTime = 50;
 
 unsigned long txCount = 0;
 unsigned long lastTxRateCheck = 0;
@@ -90,6 +91,15 @@ static uint32_t simulated_hop = 0;
 static uint8_t dummy_empty_blacklist[BLACKLIST_SIZE] = {0};
 static uint8_t anchorIdx = 0;
 static uint8_t sweepCh = CHANNEL_BASE;
+
+// Mesh lock state for the controlled blacklist demonstration mode.
+static bool meshLocked = false;
+static int32_t lockOffsetUs = 0;
+static uint32_t lockSf = 0;
+static uint32_t lockLastSeenMs = 0;
+static uint32_t lockLastScanMs = 0;
+static uint8_t lockScanIndex = 0;
+static uint32_t lockLastJamSf = 0xFFFFFFFFUL;
 
 // UI State
 uint16_t screenID = 0;
@@ -139,10 +149,124 @@ void stepPower(int delta) {
     radio.setPALevel(PA_VALS[paIndex]);
 }
 
+inline void blastPackets(uint8_t count);
+
+static void resetMeshLock() {
+    meshLocked = false;
+    lockOffsetUs = 0;
+    lockSf = 0;
+    lockLastSeenMs = 0;
+    lockLastScanMs = 0;
+    lockScanIndex = 0;
+    lockLastJamSf = 0xFFFFFFFFUL;
+}
+
+static void pollSyncBeacon() {
+    if (!radio.available()) return;
+
+    uint8_t raw[RF_PAYLOAD_SIZE];
+    radio.read(raw, RF_PAYLOAD_SIZE);
+
+    SyncFrame sync{};
+    memcpy(&sync, raw, sizeof(sync));
+    if (!validHeader(sync.magic, sync.version, sync.type, sync.src, sync.dst) ||
+        sync.src != NODE_B || sync.type != FT_SYNC) {
+        return;
+    }
+
+    uint32_t localAtRx = micros();
+    lockSf = sync.sf;
+    lockOffsetUs = (int32_t)(sync.sf * SUPERFRAME_US) - (int32_t)localAtRx;
+    lockLastSeenMs = millis();
+    meshLocked = true;
+    lockLastJamSf = 0xFFFFFFFFUL;
+
+    Serial.print(F("LOCK|ACQUIRED|sf="));
+    Serial.print(lockSf);
+    Serial.print(F("|anchor="));
+    Serial.print(currentChannel);
+    Serial.print(F("|target="));
+    Serial.println(currentChannel);
+}
+
+static void serviceMeshLock() {
+    uint32_t nowMs = millis();
+
+    if (meshLocked && nowMs - lockLastSeenMs > 2000UL) {
+        meshLocked = false;
+        lockScanIndex = 0;
+        lockLastScanMs = 0;
+        Serial.println(F("LOCK|LOST|reason=sync-timeout"));
+    }
+
+    if (!meshLocked) {
+        radio.startListening();
+        if (nowMs - lockLastScanMs >= 50UL) {
+            lockLastScanMs = nowMs;
+            setChannel(SYNC_ANCHORS[lockScanIndex]);
+            lockScanIndex = (lockScanIndex + 1) % NUM_SYNC_ANCHORS;
+        }
+        pollSyncBeacon();
+    }
+}
+
+static uint32_t lockedLogicalUs() {
+    return (uint32_t)((int64_t)micros() + lockOffsetUs);
+}
+
+static void serviceLockedAttack() {
+    serviceMeshLock();
+    if (!meshLocked) return;
+
+    uint32_t logical = lockedLogicalUs();
+    uint32_t sf = logical / SUPERFRAME_US;
+    uint32_t phase = logical % SUPERFRAME_US;
+
+    // Listen for the next SYNC beacon at the same phase used by the nodes.
+    if (phase < SLOT_SYNC_US) {
+        if (phase < 300UL) {
+            radio.startListening();
+            setChannel(getSyncChannel(sf));
+        }
+        pollSyncBeacon();
+        return;
+    }
+
+    // Jam the selected test channel during Node B's guard/probe window.
+    if (phase >= GUARD_START && sf != lockLastJamSf) {
+        lockLastJamSf = sf;
+        radio.stopListening();
+        setChannel(currentChannel);
+        blastPackets(2);
+        radio.startListening();
+    }
+}
+
+static void selectMode(JammerMode nextMode) {
+    mode = nextMode;
+    if (mode == JAM_AUTOHOP) simulated_hop = micros() / DWELL_US;
+    if (mode == JAM_LOCK) {
+        resetMeshLock();
+        if (jamming && !paused) {
+            radio.startListening();
+            setChannel(SYNC_ANCHORS[0]);
+        }
+    } else {
+        meshLocked = false;
+        if (jamming && !paused) radio.stopListening();
+    }
+}
+
 void startJammer() {
     jamming = true;
     paused = false;
-    radio.stopListening();
+    if (mode == JAM_LOCK) {
+        resetMeshLock();
+        radio.startListening();
+        setChannel(SYNC_ANCHORS[0]);
+    } else {
+        radio.stopListening();
+    }
     radio.setPALevel(PA_VALS[paIndex]);
     radio.setDataRate(RF24_250KBPS);
     radio.setPayloadSize(32);
@@ -175,13 +299,15 @@ void togglePause() {
         radio.startListening();
         Serial.println(F("[JAMMER] PAUSED (RF Output Suspended)"));
     } else {
-        radio.stopListening();
+        if (mode == JAM_LOCK && !meshLocked) radio.startListening();
+        else radio.stopListening();
         Serial.println(F("[JAMMER] RESUMED"));
     }
 }
 
 // ---------------- RF Transmit Utilities ----------------
 inline void blastPackets(uint8_t count) {
+    radio.stopListening();
     for (uint8_t i = 0; i < count; i++) {
         junk[random(0, 32)] = (uint8_t)random(0x00, 0xFF);
         radio.writeFast(junk, 32);
@@ -217,9 +343,9 @@ void drawHeader() {
 }
 
 void drawModeButtons() {
-    // Mode Buttons: 7 buttons laid out in 2 rows
+    // Mode Buttons: 8 buttons laid out in 2 rows
     // Row 1: SPOT, SWEEP, RANDOM, AUTO-HOP
-    // Row 2: ADAPTIVE, BURST, ANCHOR
+    // Row 2: ADAPTIVE, BURST, ANCHOR, LOCK
     int btnW1 = 110;
     int btnH = 32;
     int startY1 = 44;
@@ -239,10 +365,10 @@ void drawModeButtons() {
         tft.print(MODE_NAMES[i]);
     }
 
-    int btnW2 = 148;
+    int btnW2 = 110;
     int startY2 = 82;
-    for (int i = 0; i < 3; i++) {
-        int x = 10 + i * (btnW2 + 9);
+    for (int i = 0; i < 4; i++) {
+        int x = 10 + i * (btnW2 + 8);
         int modeIdx = i + 4;
         bool isActive = (mode == (JammerMode)modeIdx);
         uint16_t bg = isActive ? COLOR_RED : COLOR_CARD;
@@ -253,7 +379,7 @@ void drawModeButtons() {
         tft.drawRoundRect(x, startY2, btnW2, btnH, 6, border);
         tft.setTextColor(text, bg);
         tft.setTextSize(1);
-        tft.setCursor(x + 16, startY2 + 12);
+        tft.setCursor(x + 12, startY2 + 12);
         tft.print(MODE_NAMES[modeIdx]);
     }
 }
@@ -405,7 +531,7 @@ void drawSpectrumBar() {
     tft.fillRect(barX, barY, barW, barH, COLOR_DARK);
     tft.drawRect(barX - 1, barY - 1, barW + 2, barH + 2, COLOR_BORDER);
 
-    // Draw 4 Anchor Channel Markers (10, 42, 74, 106)
+    // Draw the current sync anchor markers.
     for (int i = 0; i < NUM_ANCHOR_CHANNELS; i++) {
         int anchX = barX + map(ANCHOR_CHANNELS[i], CHANNEL_BASE, CHANNEL_BASE + NUM_CHANNELS, 0, barW);
         tft.drawFastVLine(anchX, barY, barH, COLOR_ACCENT);
@@ -467,8 +593,7 @@ void handleTouch(int tx, int ty) {
         for (int i = 0; i < 4; i++) {
             int x = 10 + i * (btnW1 + 8);
             if (tx >= x && tx <= (x + btnW1)) {
-                mode = (JammerMode)i;
-                if (mode == JAM_AUTOHOP) simulated_hop = micros() / DWELL_US;
+                selectMode((JammerMode)i);
                 Serial.print(F("[TOUCH] Selected Mode: "));
                 Serial.println(MODE_NAMES[mode]);
                 drawModeButtons();
@@ -479,11 +604,11 @@ void handleTouch(int tx, int ty) {
 
     // Mode Buttons Row 2 (y: 82 to 114)
     if (ty >= 82 && ty <= 114) {
-        int btnW2 = 148;
-        for (int i = 0; i < 3; i++) {
-            int x = 10 + i * (btnW2 + 9);
+        int btnW2 = 110;
+        for (int i = 0; i < 4; i++) {
+            int x = 10 + i * (btnW2 + 8);
             if (tx >= x && tx <= (x + btnW2)) {
-                mode = (JammerMode)(i + 4);
+                selectMode((JammerMode)(i + 4));
                 Serial.print(F("[TOUCH] Selected Mode: "));
                 Serial.println(MODE_NAMES[mode]);
                 drawModeButtons();
@@ -558,7 +683,7 @@ void handleTouch(int tx, int ty) {
         if (tx >= 10 && tx <= 470) {
             int selectedCh = map(tx, 10, 470, CHANNEL_BASE, CHANNEL_BASE + NUM_CHANNELS);
             setChannel(selectedCh);
-            mode = JAM_SPOT;
+            selectMode(JAM_SPOT);
             drawModeButtons();
             drawSteppers();
             drawSpectrumBar();
@@ -627,50 +752,56 @@ void processSerial() {
             case '1':
             case 's':
             case 'S':
-                mode = JAM_SPOT;
+                selectMode(JAM_SPOT);
                 drawModeButtons();
                 break;
 
             case '2':
             case 'b':
             case 'B':
-                mode = JAM_SWEEP;
+                selectMode(JAM_SWEEP);
                 drawModeButtons();
                 break;
 
             case '3':
             case 'r':
             case 'R':
-                mode = JAM_RANDOM;
+                selectMode(JAM_RANDOM);
                 drawModeButtons();
                 break;
 
             case '4':
             case 'h':
             case 'H':
-                mode = JAM_AUTOHOP;
-                simulated_hop = micros() / DWELL_US;
+                selectMode(JAM_AUTOHOP);
                 drawModeButtons();
                 break;
 
             case '5':
             case 'a':
             case 'A':
-                mode = JAM_ADAPTIVE;
+                selectMode(JAM_ADAPTIVE);
                 drawModeButtons();
                 break;
 
             case '6':
             case 'u':
             case 'U':
-                mode = JAM_BURST;
+                selectMode(JAM_BURST);
                 drawModeButtons();
                 break;
 
             case '7':
             case 'x':
             case 'X':
-                mode = JAM_ANCHOR;
+                selectMode(JAM_ANCHOR);
+                drawModeButtons();
+                break;
+
+            case '8':
+            case 'l':
+            case 'L':
+                selectMode(JAM_LOCK);
                 drawModeButtons();
                 break;
 
@@ -679,7 +810,7 @@ void processSerial() {
                 int ch = Serial.parseInt();
                 if (ch >= CHANNEL_BASE && ch < CHANNEL_BASE + NUM_CHANNELS) {
                     setChannel(ch);
-                    mode = JAM_SPOT;
+                    selectMode(JAM_SPOT);
                     drawModeButtons();
                     drawSteppers();
                     drawSpectrumBar();
@@ -712,7 +843,8 @@ void processSerial() {
                 Serial.println(F("\n--- HopperNet Jammer CLI ---"));
                 Serial.println(F("j: Start/Stop | k/space: Pause/Resume"));
                 Serial.println(F("+/-: Channel Step | [/]: Dwell Step | </>: Power Step"));
-                Serial.println(F("1: Spot | 2: Sweep | 3: Random | 4: AutoHop | 5: Adaptive | 6: Burst | 7: Anchor"));
+                Serial.println(F("1: Spot | 2: Sweep | 3: Random | 4: AutoHop | 5: Adaptive | 6: Burst | 7: Anchor | 8: Lock"));
+                Serial.println(F("LOCK: capture Node B SYNC, then jam selected channel in guard window"));
                 Serial.println(F("c <ch>: Set Ch | d <ms>: Set Dwell | p <0-3>: Set PA\n"));
                 break;
         }
@@ -748,6 +880,9 @@ void setup() {
         radio.setDataRate(RF24_250KBPS);
         radio.setPayloadSize(32);
         radio.setAutoAck(false);
+        radio.setCRCLength(RF24_CRC_16);
+        radio.openWritingPipe(0xC3C3C3C3C3LL);
+        radio.openReadingPipe(1, 0xC3C3C3C3C3LL);
         radio.setChannel(currentChannel);
         radio.startListening();
     }
@@ -773,11 +908,14 @@ void loop() {
                 break;
 
             case JAM_SWEEP:
-                sweepCh++;
-                if (sweepCh >= CHANNEL_BASE + NUM_CHANNELS) sweepCh = CHANNEL_BASE;
-                currentChannel = sweepCh;
-                radio.setChannel(currentChannel);
-                blastPackets(2);
+                if (now - lastDwellAction >= (unsigned long)dwellTime) {
+                    sweepCh++;
+                    if (sweepCh >= CHANNEL_BASE + NUM_CHANNELS) sweepCh = CHANNEL_BASE;
+                    currentChannel = sweepCh;
+                    radio.setChannel(currentChannel);
+                    blastPackets(2);
+                    lastDwellAction = now;
+                }
                 break;
 
             case JAM_RANDOM:
@@ -790,7 +928,7 @@ void loop() {
                 break;
 
             case JAM_AUTOHOP:
-                if (now - lastDwellAction >= 25) { // Track 25ms FHSS dwell
+                if (now - lastDwellAction >= (DWELL_US / 1000UL)) { // Track the 50ms FHSS superframe
                     simulated_hop++;
                     currentChannel = channel_for_hop(simulated_hop, FHSS_SEED, dummy_empty_blacklist);
                     radio.setChannel(currentChannel);
@@ -831,6 +969,10 @@ void loop() {
                     blastPackets(4);
                     lastDwellAction = now;
                 }
+                break;
+
+            case JAM_LOCK:
+                serviceLockedAttack();
                 break;
         }
     }

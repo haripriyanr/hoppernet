@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HopperNet / MedRelay Auto-Detect Hub</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Spectrum-Pipe — Jammer-Resilient FHSS Mesh Hub</title>
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,13 +11,13 @@
 </head>
 <body>
     <div class="app-wrapper">
-        <!-- Header -->
+        <!-- Top Navigation Header -->
         <header class="top-header">
             <div class="brand-title">
                 <div class="pulse-icon"></div>
                 <div>
-                    <h1>MEDRELAY AUTO-HUB</h1>
-                    <div class="subtitle">Auto-Detecting Multi-Node Mesh Controller & Bidirectional Comms</div>
+                    <h1>SPECTRUM-PIPE MESH HUB</h1>
+                    <div class="subtitle">100% Local Jammer-Resilient FHSS Mesh &bull; In-Memory Edge Buffering</div>
                 </div>
             </div>
             <div class="header-status">
@@ -25,7 +25,7 @@
             </div>
         </header>
 
-        <!-- Auto-Detected Nodes Rack -->
+        <!-- Node Rack (Mobile & Desktop Responsive Grid) -->
         <section class="node-rack">
             <!-- Node A -->
             <div class="node-box" id="box-node-a">
@@ -34,69 +34,87 @@
                     <span class="port-badge" id="port-node-a">DISCONNECTED</span>
                 </div>
                 <div class="node-metrics">
-                    <div class="m-row"><span>Sent:</span> <span class="val" id="sent-node-a">0</span></div>
-                    <div class="m-row"><span>Received:</span> <span class="val" id="recv-node-a">0</span></div>
-                    <div class="m-row"><span>Sync:</span> <span class="val" id="sync-node-a">--</span></div>
+                    <div class="m-row"><span>Sent / Ack <span class="tooltip">&#9432;<span class="tip-text">Dispatched packets and verified relay custody handshakes.</span></span>:</span> <span class="val" id="sent-node-a">0 sent (100%)</span></div>
+                    <div class="m-row"><span>Digital RPD <span class="tooltip">&#9432;<span class="tip-text">Received Power Detector. High RF (> -64 dBm) indicates jamming/interference.</span></span>:</span> <span class="val ok" id="rpd-node-a">&lt; -64dBm (Clean)</span></div>
+                    <div class="m-row"><span>Packet Loss <span class="tooltip">&#9432;<span class="tip-text">Air fragment loss percentage. 0% indicates guaranteed delivery.</span></span>:</span> <span class="val ok" id="loss-node-a">0.0% (0 drops)</span></div>
+                    <div class="m-row"><span>Sync Status <span class="tooltip">&#9432;<span class="tip-text">Continuous superframe hopping lock status.</span></span>:</span> <span class="val ok" id="sync-node-a">--</span></div>
                 </div>
             </div>
 
             <!-- Node B -->
             <div class="node-box" id="box-node-b">
                 <div class="node-box-header">
-                    <span class="node-tag" style="color:#f59e0b;">NODE B (Relay)</span>
+                    <span class="node-tag" style="color:#fbbf24;">NODE B (Master Relay)</span>
                     <span class="port-badge" id="port-node-b">DISCONNECTED</span>
                 </div>
                 <div class="node-metrics">
-                    <div class="m-row"><span>Forward Buf:</span> <span class="val" id="fbuf-node-b">0</span></div>
-                    <div class="m-row"><span>Reverse Buf:</span> <span class="val" id="rbuf-node-b">0</span></div>
-                    <div class="m-row"><span>Jammed Ch:</span> <span class="val" id="jam-node-b">0</span></div>
+                    <div class="m-row"><span>Fwd Custody Buf <span class="tooltip">&#9432;<span class="tip-text">520 KB SRAM buffer depth holding packets destined for Node C.</span></span>:</span> <span class="val warn" id="fbuf-node-b">0 pkts</span></div>
+                    <div class="m-row"><span>Digital RPD <span class="tooltip">&#9432;<span class="tip-text">RPD carrier energy detector on active master relay frequency.</span></span>:</span> <span class="val ok" id="rpd-node-b">&lt; -64dBm (Clean)</span></div>
+                    <div class="m-row"><span>Packet Loss <span class="tooltip">&#9432;<span class="tip-text">Relay drop rate. 0% loss guarantee with store-and-forward edge buffer.</span></span>:</span> <span class="val ok" id="loss-node-b">0.0% (0 drops)</span></div>
+                    <div class="m-row"><span>RPD Jammed Ch <span class="tooltip">&#9432;<span class="tip-text">Channels masked dynamically in blacklist due to detected RF carrier energy.</span></span>:</span> <span class="val danger" id="jam-node-b">0 / 124</span></div>
                 </div>
             </div>
 
             <!-- Node C -->
             <div class="node-box" id="box-node-c">
                 <div class="node-box-header">
-                    <span class="node-tag" style="color:#34d399;">NODE C (Dest)</span>
+                    <span class="node-tag" style="color:#34d399;">NODE C (Destination)</span>
                     <span class="port-badge" id="port-node-c">DISCONNECTED</span>
                 </div>
                 <div class="node-metrics">
-                    <div class="m-row"><span>Received:</span> <span class="val" id="recv-node-c">0</span></div>
-                    <div class="m-row"><span>Returns Sent:</span> <span class="val" id="sent-node-c">0</span></div>
-                    <div class="m-row"><span>Sync:</span> <span class="val" id="sync-node-c">--</span></div>
+                    <div class="m-row"><span>Received E2E <span class="tooltip">&#9432;<span class="tip-text">Decrypted and verified end-to-end payload messages received.</span></span>:</span> <span class="val ok" id="recv-node-c">0 pkts</span></div>
+                    <div class="m-row"><span>Digital RPD <span class="tooltip">&#9432;<span class="tip-text">Received Power Detector energy reading at destination receiver.</span></span>:</span> <span class="val ok" id="rpd-node-c">&lt; -64dBm (Clean)</span></div>
+                    <div class="m-row"><span>Packet Loss <span class="tooltip">&#9432;<span class="tip-text">Return path packet loss percentage.</span></span>:</span> <span class="val ok" id="loss-node-c">0.0% (0 drops)</span></div>
+                    <div class="m-row"><span>Sync Status <span class="tooltip">&#9432;<span class="tip-text">Destination synchronization lock retention percentage.</span></span>:</span> <span class="val ok" id="sync-node-c">--</span></div>
                 </div>
             </div>
 
             <!-- Jammer -->
             <div class="node-box" id="box-jammer">
                 <div class="node-box-header">
-                    <span class="node-tag" style="color:#f87171;">JAMMER</span>
+                    <span class="node-tag" style="color:#f87171;">JAMMER ADVERSARY</span>
                     <span class="port-badge" id="port-jammer">DISCONNECTED</span>
                 </div>
                 <div class="node-metrics">
-                    <div class="m-row"><span>State:</span> <span class="val" id="state-jammer">IDLE</span></div>
-                    <div class="m-row"><span>Channel:</span> <span class="val" id="ch-jammer">--</span></div>
-                    <div class="m-row"><span>TX Packets:</span> <span class="val" id="tx-jammer">0</span></div>
+                    <div class="m-row"><span>State <span class="tooltip">&#9432;<span class="tip-text">Adversary transmission emission status.</span></span>:</span> <span class="val" id="state-jammer">IDLE</span></div>
+                    <div class="m-row"><span>Target Channel <span class="tooltip">&#9432;<span class="tip-text">Frequency channel targeted by jammer (2400 + CH MHz).</span></span>:</span> <span class="val" id="ch-jammer">--</span></div>
+                    <div class="m-row"><span>Jamming Mode <span class="tooltip">&#9432;<span class="tip-text">Continuous spot, sweep across 124 ch, or reactive jamming.</span></span>:</span> <span class="val" id="tx-jammer">SPOT / SWEEP</span></div>
                 </div>
             </div>
         </section>
 
-        <!-- Main Bidirectional Messenger & Console -->
+        <!-- Store-and-Forward Dead-Zone Simulation Control -->
+        <section class="demo-banner">
+            <div>
+                <div class="demo-title">Store-and-Forward Edge Buffering Simulation</div>
+                <div class="demo-subtitle" id="buffer-status-text">
+                    Master Relay In-Memory SRAM Custody Buffer: <span id="fbuf-highlight" style="color:#fbbf24; font-family:monospace; font-weight:800; font-size:1.15rem;">0</span> packets (0% Loss Guarantee)
+                </div>
+            </div>
+            <div>
+                <button id="btn-desktop-linkdown" class="btn-toggle-deadzone">
+                    🔌 SIMULATE DEAD-ZONE (TURN NODE C OFF)
+                </button>
+            </div>
+        </section>
+
+        <!-- Main Bidirectional Messenger & Multi-Port Serial Console -->
         <main class="main-hub">
             <!-- Left: Bidirectional Chat Console (A <-> C) -->
             <div class="chat-panel">
                 <div class="panel-title">
                     <h2>Bidirectional Mesh Messenger (A ⇄ B ⇄ C)</h2>
-                    <span style="font-size:0.75rem; color:var(--text-muted);">Slotted FHSS Link</span>
+                    <span class="badge-timing" id="rtt-badge">1,824 &micro;s Handshake RTT</span>
                 </div>
                 <div class="chat-stream" id="chat-stream">
                     <!-- Dynamic chat messages -->
                 </div>
                 <div class="chat-input-area">
-                    <select id="chat-direction" style="background:#1e293b; color:white; border:1px solid var(--border); border-radius:8px; padding:0 0.5rem; font-size:0.8rem;">
+                    <select id="chat-direction">
                         <option value="A_TO_C">Node A ➔ C (Forward)</option>
                         <option value="C_TO_A">Node C ➔ A (Reverse)</option>
                     </select>
-                    <input type="text" id="chat-input" placeholder="Type message to transmit over radio mesh..." maxlength="23" autocomplete="off">
+                    <input type="text" id="chat-input" placeholder="Type alert message over FHSS mesh..." maxlength="23" autocomplete="off">
                     <button class="btn-send" id="btn-send">TRANSMIT</button>
                 </div>
             </div>
@@ -104,8 +122,8 @@
             <!-- Right: Real-Time Auto-Detected Serial Stream -->
             <div class="chat-panel">
                 <div class="panel-title">
-                    <h2>Live Multi-Port Serial Bus Stream</h2>
-                    <span style="font-size:0.75rem; color:var(--text-muted);">115200 Baud Auto-Capture</span>
+                    <h2>Live Multi-Port Serial Bus Telemetry</h2>
+                    <span class="badge-timing">115200 Baud Multi-COM</span>
                 </div>
                 <div class="log-stream" id="log-stream">
                     <!-- Serial logs stream -->

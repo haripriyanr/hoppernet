@@ -453,8 +453,8 @@ def slide_arch(prs):
         [("Master Clock", "Broadcasts SYNC beacon every 25 ms: hop index + timestamp + blacklist bitmap."),
          ("Edge Buffer",  "520 KB SRAM circular FIFO + SPIFFS flash for zero-loss store-and-forward."),
          ("Jammer Detect","RPD carrier scan during quiet tail (24-25 ms) flags jammed channels."),
-         ("WiFi AP",      "hopperb (192.168.4.1) -- shows buffer depth, hop count, jam count."),
-         ("LCD",          "16x2 I2C display: CH:XX  HOP:NNN  BUF:N  JAM:N in real time.")],
+         ("WiFi AP",      "hopperb (192.168.4.1) -- shows buffer depth, hop count, jam count in real time."),
+         ("Telemetry",   "Real-time USB Serial streaming: CH:XX HOP:NNN BUF:N JAM:N.")],
 
         [("Role",     "Doctor terminal / ER receiver gateway for incoming alerts."),
          ("ACK",      "Sends immediate ACK frame (type 0x03, status 0x0D) to Node B on capture."),
@@ -756,25 +756,25 @@ def slide_firmware(prs):
     lcols = [Inches(0.7), Inches(0.7)+CW+GAP, Inches(0.7)+2*(CW+GAP)]
 
     cards = [
-        (CYAN, "Firmware Modules",
+        (CYAN, "Firmware Architecture",
          [("Shared FHSS Library",
            "32-byte frame parser, XORShift32 PRNG, CRC-8 (poly 0x07), and 128-bit blacklist bitmap API."),
           ("Source Node Firmware",
-           "Dual-core ESP32: Core 1 drives SPI hop timing, Core 0 polls Supabase REST for outbound messages."),
+           "Dual-core ESP32: Core 1 drives SPI hop timing, Core 0 serves local SoftAP web portal."),
           ("Relay Node Firmware",
-           "Master clock beacon, SRAM FIFO ring buffer, I2C LCD driver, RPD quiet-tail carrier detection, and SPIFFS flash paging."),
+           "Master clock beacon, SRAM FIFO ring buffer, SoftAP web console, RPD quiet-tail carrier detection, and SPIFFS flash paging."),
           ("Destination Node Firmware",
-           "Auto-generates ACK frames on packet capture and posts delivery confirmation to cloud database."),
+           "Auto-generates ACK frames on packet capture and delivers messages to local SoftAP web UI."),
           ("Jammer Firmware",
            "Multi-mode engine with fast PLL register writes for spot, random, sweep, and reactive attack patterns.")]),
 
         (ACCENT, "Circuit Design & Wiring",
          [("SPI Bus at 8 MHz",
            "Dedicated hardware SPI with 10 uF + 100 nF decoupling on nRF24 3.3V supply to prevent voltage-sag drops."),
-          ("ESP32 Nodes (A & C)",
-           "CE: GPIO 4, CSN: GPIO 5, SCK: GPIO 18, MOSI: GPIO 23, MISO: GPIO 19. Identical wiring on both."),
+          ("ESP32 Nodes (A, B & C)",
+           "CE: GPIO 4, CSN: GPIO 5, SCK: GPIO 18, MOSI: GPIO 23, MISO: GPIO 19. Clean, identical 7-wire pinout."),
           ("Relay Node (B)",
-           "Same ESP32 pinout. 16x2 LCD on I2C (GPIO 21/22). 10 uF cap on nRF24 VCC."),
+           "Identical 7-wire ESP32 pinout with 520 KB SRAM buffer. 10 uF cap on nRF24 VCC."),
           ("Jammer (Mega 2560)",
            "CE: Pin 43, CSN: Pin 45, SPI: Pins 50-52. 3.5\" TFT shield on front headers (D2-D13, A0-A5)."),
           ("Power",
@@ -977,23 +977,23 @@ def slide_validation(prs):
 
     tests = [
         (c1, r1, CYAN,  "Test 1 -- Mesh Power-Up & Sync Lock",
-         ["1.  Power up Node B. LCD shows:  CH:---  HOP:0  BUF:0  JAM:0",
+         ["1.  Power up Node B. Web/Serial shows:  CH:---  HOP:0  BUF:0  JAM:0",
           "2.  Power Nodes A & C. Both lock onto SYNC beacon within 380 ms.",
           "3.  All three nodes begin hopping across 124 channels in lockstep."]),
 
         (c2, r1, GREEN, "Test 2 -- End-to-End Message Delivery",
-         ["1.  Send 'Code Blue Room 304' from Node A web UI or Supabase dashboard.",
+         ["1.  Send 'Code Blue Room 304' from Node A local SoftAP web UI.",
           "2.  Node A encapsulates in 32B frame, transmits to B. B forwards to C.",
           "3.  Node C receives and confirms delivery. Round-trip < 65 ms."]),
 
         (c1, r2, AMBER, "Test 3 -- Dead-Zone Buffering (Zero-Loss Proof)",
          ["1.  Unplug Node C to simulate doctor entering an elevator.",
-          "2.  Dispatch 5 messages. Node B LCD updates:  BUF: 5 pk.",
+          "2.  Dispatch 5 messages. Node B buffer depth updates:  BUF: 5 pk.",
           "3.  Plug C back in. All 5 packets drain within 240 ms. 0.0% loss."]),
 
         (c2, r2, RED,   "Test 4 -- RF Jammer Stress & Blacklisting",
          ["1.  Mega jammer fires +20 dBm spot jammer on CH 45 (2.445 GHz).",
-          "2.  Node B detects carrier in quiet tail scan. Blacklists CH 45. LCD: JAM: 1.",
+          "2.  Node B detects carrier in quiet tail scan. Blacklists CH 45. JAM: 1.",
           "3.  All 3 nodes skip CH 45 on the very next hop. Zero packet drop."]),
     ]
 
@@ -1088,7 +1088,7 @@ def slide_defense(prs):
         ("RF Protocol & Firmware",
          "Slotted 25 ms FHSS timing engine, XORShift32 PRNG, CRC-8 frame structure, FreeRTOS Core 1 SPI driver."),
         ("Embedded Hardware",
-         "Node assembly, SPI signal routing, decoupling capacitor placement, 16x2 LCD wiring, and jammer touchscreen integration."),
+         "Node assembly, SPI signal routing, decoupling capacitor placement, and jammer touchscreen integration."),
         ("Cloud & Full-Stack",
          "Supabase database schema, REST API polling logic, WebSocket telemetry stream, HTML5 spectrum heatmap."),
         ("RF Modelling & Testing",

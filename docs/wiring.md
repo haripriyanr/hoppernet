@@ -5,12 +5,11 @@
 ## ⚡ Global Power & Safety Rules
 1. **nRF24L01+ Power**: Connect **ONLY to 3.3V**. Connecting to 5V will destroy the radio module.
 2. **Capacitor Rule (CRITICAL)**: Solder or bridge a **10 µF electrolytic (or 100 nF ceramic) capacitor** across `VCC` and `GND` directly at the nRF24 module pins to prevent voltage dropouts during RF transmission spikes.
-3. **16×2 I2C LCD Power**: Connect `VCC` to **5V (VIN)** on the ESP32 (or 3.3V if your backpack supports 3.3V) and `GND` to ESP32 **GND**.
 
 ---
 
 ## 1. Node A — Source Endpoint (ESP32 DevKit)
-**Role**: Dispatches emergency messages, telemetry, vitals, and image packets. Connected to PC via USB.
+**Role**: Dispatches emergency messages, telemetry, vitals, and data packets. Connected to PC via USB.
 
 | nRF24L01+ Pin | ESP32 Pin | Wire Type | Description |
 | :--- | :--- | :--- | :--- |
@@ -27,39 +26,31 @@
 
 ---
 
-## 2. Node B — Master Relay & Edge Buffer (ESP32 DevKit + 16×2 LCD)
-**Role**: Master FHSS clock, dual-direction in-memory store-and-forward edge buffer (520KB RAM), 16×2 LCD display.
+## 2. Node B — Master Relay & Edge Buffer (ESP32 DevKit)
+**Role**: Master FHSS clock (50ms superframe), dual-direction in-memory store-and-forward edge buffer (520KB RAM), Web SoftAP `hopperb`.
 
-### A. Radio Wiring (nRF24L01+):
 | nRF24L01+ Pin | ESP32 Pin | Wire Type | Description |
 | :--- | :--- | :--- | :--- |
 | **VCC (Pin 2)** | **3.3V** | Female–Female | Radio Power (3.3V ONLY) |
-| **GND (Pin 1)** | **GND** | Female–Female | Ground |
+| **GND (Pin 1)** | **GND** | Female–Female | Common Ground |
 | **CE (Pin 3)** | **GPIO 4** | Female–Female | Chip Enable |
 | **CSN (Pin 4)** | **GPIO 5** | Female–Female | SPI Chip Select |
 | **SCK (Pin 5)** | **GPIO 18** | Female–Female | VSPI Clock |
 | **MOSI (Pin 6)** | **GPIO 23** | Female–Female | VSPI Master Out |
 | **MISO (Pin 7)** | **GPIO 19** | Female–Female | VSPI Master In |
+| **IRQ (Pin 8)** | *Unconnected* | — | Not used |
 
-### B. 16×2 I2C LCD Wiring (I2C Backpack):
-| 16×2 LCD Pin | ESP32 Pin | Wire Type | Description |
-| :--- | :--- | :--- | :--- |
-| **VCC** | **5V (VIN)** | Female–Female | LCD Logic & Backlight Power |
-| **GND** | **GND** | Female–Female | Common Ground |
-| **SDA** | **GPIO 21** | Female–Female | I2C Data |
-| **SCL** | **GPIO 22** | Female–Female | I2C Clock |
-
-*Total Wires Needed for Node B*: **11× Female-to-Female**
+*Total Wires Needed for Node B*: **7× Female-to-Female**
 
 ---
 
 ## 3. Node C — Destination Endpoint (ESP32 DevKit)
-**Role**: Destination sink. Receives messages from Node A, sends ACKs and return messages back through Node B.
+**Role**: Destination sink. Receives messages from Node A, sends ACKs and return messages back through Node B. Web SoftAP `hopperc`.
 
 | nRF24L01+ Pin | ESP32 Pin | Wire Type | Description |
 | :--- | :--- | :--- | :--- |
 | **VCC (Pin 2)** | **3.3V** | Female–Female | Radio Power (3.3V ONLY) |
-| **GND (Pin 1)** | **GND** | Female–Female | Ground |
+| **GND (Pin 1)** | **GND** | Female–Female | Common Ground |
 | **CE (Pin 3)** | **GPIO 4** | Female–Female | Chip Enable |
 | **CSN (Pin 4)** | **GPIO 5** | Female–Female | SPI Chip Select |
 | **SCK (Pin 5)** | **GPIO 18** | Female–Female | VSPI Clock |
@@ -96,9 +87,6 @@ Connect to the 2-row header at the bottom/back edge of the Arduino Mega (pins 50
 
 ## Total Jumper Wire Inventory Checklist
 
-- **Female-to-Female (F-F)**: **25 wires**
-  - Node A: 7
-  - Node B: 11
-  - Node C: 7
-- **Male-to-Female (M-F)**: **7 wires**
-  - Jammer: 7
+- **Female-to-Female (F-F)**: **21 wires** (7 for Node A + 7 for Node B + 7 for Node C)
+- **Male-to-Female (M-F)**: **7 wires** (7 for Jammer)
+

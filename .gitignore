@@ -4,9 +4,22 @@ firmware/node_b/run/
 
 # Arduino / build artifacts
 build/
+build_b/
+**/build/
+**/build_b/
 *.o
+*.a
+*.d
 *.elf
 *.bin
+*.map
+*.merged
+*.merged.bin
+*.partitions.bin
+*.bootloader.bin
+*.libsdetect.d
+compile_commands.json
+*.zip
 
 # Python
 __pycache__/

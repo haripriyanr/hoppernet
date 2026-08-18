@@ -33,7 +33,8 @@
 
 // ---------------- RF Spectrum Configuration ----------------
 #define NUM_SYNC_ANCHORS  4
-static const uint8_t SYNC_ANCHORS[NUM_SYNC_ANCHORS] = { 0, 40, 80, 120 };
+// Anchors live at 2.483-2.513 GHz, above all Wi-Fi 1/6/11 bands (ends ~2.473 GHz)
+static const uint8_t SYNC_ANCHORS[NUM_SYNC_ANCHORS] = { 83, 93, 103, 113 };
 
 static inline uint8_t getSyncChannel(uint32_t sf) {
     return SYNC_ANCHORS[sf & 0x03];
@@ -47,6 +48,11 @@ static inline uint8_t getSyncChannel(uint32_t sf) {
 #define RF_PAYLOAD_SIZE   32
 #define DATA_PLAINTEXT_MAX 8       // 8 bytes plaintext payload per frame fragment
 #define GCM_TAG_SIZE      8        // 8-byte AES-GCM authentication tag
+#define DATA_FLAG_E2E      0x01    // Payload is end-to-end encrypted
+#define DATA_FLAG_RECOVERED 0x02   // Relay delivered a fragment from backlog
+#define DATA_FLAG_CRITICAL 0x04    // Application marks the message as critical
+// Two independent PRNG sequences: A->B (FHSS_SEED_AB) and B->C / C->B
+// (FHSS_SEED_BC). Each hop rides its own hopping domain.
 #define FHSS_SEED_AB      0x41B2D931UL
 #define FHSS_SEED_BC      0xC73A91E5UL
 
@@ -56,12 +62,12 @@ static inline uint8_t getSyncChannel(uint32_t sf) {
 #define NUM_CHANNELS      RF_CHANNEL_COUNT
 #define FHSS_SEED         FHSS_SEED_AB
 #define DWELL_US          SUPERFRAME_US
-#define NUM_ANCHOR_CHANNELS 6
-static const uint8_t ANCHOR_CHANNELS[NUM_ANCHOR_CHANNELS] = { 10, 30, 50, 70, 90, 110 };
+#define NUM_ANCHOR_CHANNELS NUM_SYNC_ANCHORS
+static const uint8_t ANCHOR_CHANNELS[NUM_ANCHOR_CHANNELS] = { 83, 93, 103, 113 };
 
 // ---------------- 50 ms Slotted Superframe Timing ----------------
 // Node B is master clock:
-// 0 - 4 ms   : Sync & Blacklist Beacon on fixed rendezvous Channel 0
+// 0 - 4 ms   : Sync & Blacklist Beacon on rotating anchor + Channel 0
 // 4 - 16 ms  : A -> B Forward Path on hop channel AB (12 ms window)
 // 16 - 28 ms : B -> C Forward Drain on hop channel BC (12 ms window)
 // 28 - 40 ms : C -> B Return Path on hop channel BC (12 ms window)
@@ -120,7 +126,8 @@ struct __attribute__((packed)) AckFrame {
     uint16_t msgId;       // 2
     uint8_t  frag;        // 1
     uint8_t  code;        // 1 (1 = CUSTODY, 2 = DELIVERY)
-    uint8_t  reserved[18];// 18 -> Total: 32 bytes
+    uint32_t masterUs;    // 4 (Master microsecond timestamp for sub-microsecond phase lock)
+    uint8_t  reserved[14];// 14 -> Total: 32 bytes
 }; // Exactly 32 bytes
 
 struct __attribute__((packed)) SyncFrame {
@@ -132,7 +139,7 @@ struct __attribute__((packed)) SyncFrame {
     uint32_t sf;          // 4
     uint16_t mapVersion;  // 2
     uint8_t  blacklist[BLACKLIST_BYTES]; // 16
-    uint8_t  reserved[4]; // 4 -> Total: 32 bytes
+    uint32_t masterUs;    // 4 -> Total: 32 bytes
 }; // Exactly 32 bytes
 
 static_assert(sizeof(DataFrame) == 32, "DataFrame must be exactly 32 bytes");
@@ -197,19 +204,17 @@ static inline uint8_t channel_for_hop(uint32_t sf, uint32_t seed, const uint8_t 
     return hopChannel(sf, seed, blacklist);
 }
 
-// ---------------- RF24 Safe Retuning & I/O ----------------
+// ---------------- RF24 Safe Retuning & Fast Low-Latency I/O ----------------
 static inline void setRadioChannel(RF24 &r, uint8_t ch) {
-    r.stopListening();
     r.setChannel(ch);
-    r.flush_rx();
-    r.startListening();
 }
 
 static inline bool txFrame(RF24 &radio, const void *frame) {
     radio.stopListening();
-    bool ok = radio.write(frame, RF_PAYLOAD_SIZE);
+    radio.writeFast(frame, RF_PAYLOAD_SIZE, 1); // Fast SPI write to TX FIFO without multicast wait
+    radio.txStandBy(1); // Fast wait until packet leaves antenna (~164us at 2Mbps)
     radio.startListening();
-    return ok;
+    return true;
 }
 
 static inline bool rxFrame(RF24 &radio, void *frame) {
@@ -218,10 +223,14 @@ static inline bool rxFrame(RF24 &radio, void *frame) {
     return true;
 }
 
-static inline void radioCommonBegin(RF24 &radio) {
-    radio.begin();
+static inline bool radioCommonBegin(RF24 &radio) {
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+    SPI.begin(RF_SCK_PIN, RF_MISO_PIN, RF_MOSI_PIN, RF_CSN_PIN);
+    SPI.setFrequency(10000000); // 10 MHz Hardware SPI
+#endif
+    if (!radio.begin()) return false;
     radio.setPALevel(RF24_PA_HIGH);
-    radio.setDataRate(RF24_250KBPS);
+    radio.setDataRate(RF24_2MBPS); // 2 Mbps high-speed for ~164us air time & ~625us handshake
     radio.setChannel(RF_CHANNEL_SYNC);
     radio.setPayloadSize(RF_PAYLOAD_SIZE);
     radio.setAutoAck(false);
@@ -229,6 +238,7 @@ static inline void radioCommonBegin(RF24 &radio) {
     radio.openWritingPipe(0xC3C3C3C3C3LL);
     radio.openReadingPipe(1, 0xC3C3C3C3C3LL);
     radio.startListening();
+    return true;
 }
 
 // ---------------- Application Security (AES-128-GCM) ----------------

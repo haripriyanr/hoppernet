@@ -29,8 +29,8 @@ All communication operates independently of any internet or external cloud infra
 - **No Internet Required**: Nodes run completely offline. No WiFi router or phone hotspot is needed.
 - **Each ESP32 hosts its own Wi-Fi Access Point**:
   - Connect your phone/laptop to **`hoppera`** $\rightarrow$ open `http://192.168.4.1` to transmit forward messages.
-  - Connect to **`hopperb`** $\rightarrow$ open `http://192.168.4.1` to view relay buffer depth (`fwd_buf`, `rev_buf`, `jam_count`).
-  - Connect to **`hopperc`** $\rightarrow$ open `http://192.168.4.1` to view received messages and transmit reverse replies.
+  - Connect to **`hopperb`** $\rightarrow$ open `http://192.168.4.1` to view relay buffer depth (`fwd_buf`, `jam_count`).
+  - Connect to **`hopperc`** $\rightarrow$ open `http://192.168.4.1` to view received messages.
 - **Local Desktop App (`app/main.py`)**:
   - Connects to all plugged USB COM ports simultaneously.
   - Auto-detects device roles (`NODE_A`, `NODE_B`, `NODE_C`, `JAMMER`).
@@ -38,47 +38,45 @@ All communication operates independently of any internet or external cloud infra
 
 ---
 
-### 2. 25-Millisecond Slotted FHSS Protocol Flow
+### 2. 50-Millisecond Slotted FHSS Protocol Flow (Bidirectional)
 
-Every 25 ms dwell interval hops across the 124 available frequencies ($2.402\text{ GHz to }2.525\text{ GHz}$) divided into strict microsecond time slots:
+Every 50 ms superframe hops across the 124 available frequencies ($2.402\text{ GHz to }2.525\text{ GHz}$). The A→B hop rides `FHSS_SEED_AB`; the B→C / C→B hop rides `FHSS_SEED_BC` — Node B and Node C switch channels in lockstep between forward and return slots:
 
 ```
-0 ms              2 ms                     13 ms                    24 ms         25 ms
-├── SYNC Phase ───┼── FORWARD: A ➔ B ➔ C ──┼── REVERSE: C ➔ B ➔ A ──┼─ CARRIER ───┤
-│ Node B Sync     │ A sends to B (2-7ms)   │ C sends to B (13-18ms) │ RPD Energy  │
-│ Beacon (124 ch) │ B drains to C (7-13ms) │ B drains to A (18-24ms)│ Jammer Scan │
+0 ms              4 ms                     16 ms                    28 ms         40 ms    50 ms
+├── SYNC Phase ───┼── FORWARD: A ➔ B ──────┼── DRAIN: B ➔ C ───────┼── RETURN: C ➔ B ──┼─ B ➔ A ─┤
+│ Node B Beacon   │ A sends to B (4-16ms)  │ B sends to C (16-28ms)│ C replies to B    │ B drains │
+│ (anchors + Ch0) │ B custody-ACKs         │ C delivery-ACKs       │ (28-40ms)         │ to A     │
 ```
 
 #### Phase Breakdown:
-1. **Phase 1: SYNC Beacon ($0\text{ ms} \rightarrow 2\text{ ms}$)**:
-   - **Node B** (Master Clock) transmits a `FRAME_TYPE_SYNC` packet containing:
-     - Current Hop Index (32-bit)
-     - Master Microsecond Timestamp (32-bit)
+1. **Phase 1: SYNC Beacon ($0\text{ ms} \rightarrow 4\text{ ms}$)**:
+   - **Node B** (Master Clock) transmits a `FT_SYNC` packet containing:
+     - Current Superframe Index (32-bit)
      - 16-byte Active Dynamic Blacklist Mask
-   - **Node A & Node C** listen. When captured, they compute `clock_offset = master_ts - micros()` and hop in exact mathematical lockstep.
-2. **Phase 2: Forward Path A $\rightarrow$ B ($2\text{ ms} \rightarrow 7\text{ ms}$)**:
-   - **Node A** transmits its queued outbound data frame (`FRAME_TYPE_DATA`) to Node B.
-   - **Node B** receives, saves into its `fwd_queue` in SRAM, and sends an immediate ACK frame back to Node A.
-3. **Phase 3: Forward Drain B $\rightarrow$ C ($7\text{ ms} \rightarrow 13\text{ ms}$)**:
-   - **Node B** pops from `fwd_queue` and transmits to **Node C**.
-   - **Node C** receives, records the payload, and transmits an immediate ACK frame to Node B.
+   - **Node A & Node C** listen. When captured, they compute `clock_offset = master_sf - micros()` and hop in exact mathematical lockstep.
+2. **Phase 2: Forward Path A $\rightarrow$ B ($4\text{ ms} \rightarrow 16\text{ ms}$)**:
+   - **Node A** transmits its queued outbound data frame (`FT_DATA`) to Node B.
+   - **Node B** receives, saves into its `qAC` custody queue in SRAM, and sends an immediate `FT_CUSTODY` ACK frame back to Node A.
+3. **Phase 3: Forward Drain B $\rightarrow$ C ($16\text{ ms} \rightarrow 28\text{ ms}$)**:
+   - **Node B** pops from `qAC` and transmits to **Node C**.
+   - **Node C** receives, records the payload, and transmits an immediate `FT_DELIVERY` ACK/NACK frame to Node B.
    - **Node B** deletes the packet from its SRAM queue upon receiving the ACK.
-4. **Phase 4: Reverse Path C $\rightarrow$ B ($13\text{ ms} \rightarrow 18\text{ ms}$)**:
-   - **Node C** transmits return messages or reverse telemetry to Node B.
-   - **Node B** saves into its `rev_queue` in SRAM and sends an immediate ACK frame to Node C.
-5. **Phase 5: Reverse Drain B $\rightarrow$ A ($18\text{ ms} \rightarrow 24\text{ ms}$)**:
-   - **Node B** pops from `rev_queue` and transmits to **Node A**.
-   - **Node A** receives, records the return data, and sends an ACK frame to Node B.
-6. **Phase 6: Carrier Scan & Dynamic Blacklisting ($24\text{ ms} \rightarrow 25\text{ ms}$)**:
-   - **Node B** tests the radio carrier (RPD). If energy is detected repeatedly on the current channel, it automatically marks the channel as jammed in the 16-byte bitmask.
-   - On the very next hop, **all nodes skip the jammed frequency simultaneously in lockstep**.
+4. **Phase 4: Return Path C $\rightarrow$ B ($28\text{ ms} \rightarrow 40\text{ ms}$)**:
+   - **Node C** transmits its queued reply/telemetry frame (`FT_DATA`) to **Node B** and listens inline for the immediate `FT_CUSTODY` ACK.
+   - **Node B** receives, saves into its `qCA` custody queue in SRAM, and sends the custody ACK back to C.
+5. **Phase 5: Return Drain B $\rightarrow$ A ($40\text{ ms} \rightarrow 48\text{ ms}$)**:
+   - **Node B** pops from `qCA` and transmits to **Node A**.
+   - **Node A** reassembles the return message, sends an immediate `FT_DELIVERY` ACK so Node B clears custody, and displays it in the web portal.
+   - Node B runs the **RPD Jammer probe** in the guard window (48–50 ms) and automatically blacklists jammed channels in the 16-byte bitmask, distributed on the next SYNC beacon.
 
 ---
 
 ### 3. Store-and-Forward Edge Buffering (Zero Data Loss)
-- If **Node C** loses power or enters an RF dead-zone (e.g., elevator, shielded room), Node B receives no ACKs during Phase 3.
-- Node B preserves the packets in its **520 KB SRAM buffer** (`fwd_queue`, up to 256 items).
+- If **Node C** loses power or enters an RF dead-zone (e.g., elevator, shielded room), Node B receives no `FT_DELIVERY` ACKs during Phase 3.
+- Node B preserves the packets in its **SRAM buffer** (`qAC`, up to 64 items).
 - As soon as Node C returns to range, Node B detects its ACKs and flushes the entire backlog in order. **0% packet loss.**
+- The **reverse path is buffered symmetrically**: `qCA` holds Node C replies until Node A returns to range, then drains in order with the same custody/delivery ACK handshake.
 
 ---
 
@@ -134,11 +132,10 @@ arduino-cli upload -p <PORT_JAMMER> --fqbn arduino:avr:mega firmware/jammer
    - Node C Serial: `*** SYNC ACQUIRED *** Master Hop: ...`
    - Node A Webpage: `SYNC STATUS: LOCKED`.
 
-### 2. Live Bidirectional Message Dispatch
+### 2. Live Forward Message Dispatch
 1. Connect to **`hoppera`** on your phone $\rightarrow$ open `http://192.168.4.1`.
 2. Type `"Code Blue ICU"` and tap **TRANSMIT**.
 3. Connect to **`hopperc`** $\rightarrow$ open `http://192.168.4.1` $\rightarrow$ observe `"Code Blue ICU"` displayed under received messages.
-4. Type `"ACK: Doctor on way"` on Node C and tap **TRANSMIT** $\rightarrow$ open `hoppera` $\rightarrow$ observe return confirmation on Node A!
 
 ### 3. Store-and-Forward Dead-Zone Demo (Zero Loss)
 1. **Unplug Node C** (simulating dead-zone).
@@ -148,7 +145,13 @@ arduino-cli upload -p <PORT_JAMMER> --fqbn arduino:avr:mega firmware/jammer
 4. **Plug Node C back in**.
 5. Within 500 ms, Node B flushes all 3 packets to Node C. `FWD_BUF` drops to `0`. Zero data loss!
 
-### 4. RF Jammer Stress Test & Dynamic Blacklisting
+### 4. Live Return Path (C → B → A Talk-Back)
+1. Connect to **`hopperc`** $\rightarrow$ open `http://192.168.4.1`.
+2. Type `"Vitals stable"` and tap **TRANSMIT** (or START RETURN LOOP to auto-send).
+3. Connect to **`hoppera`** $\rightarrow$ observe `"Vitals stable"` under RETURN MESSAGES.
+4. Check Node B (`hopperb`): `Rev Custody C→A` and `Delivered C→A` counters increment.
+
+### 5. RF Jammer Stress Test & Dynamic Blacklisting
 1. On the **Mega Jammer**, select a channel (e.g. Channel 45) and start jamming.
 2. Observe Node B: `JAMMER DETECTED -> Blacklisted channel 45 (total: 1)`.
 3. All three nodes automatically skip Channel 45 on the very next hop with zero packet drop.
