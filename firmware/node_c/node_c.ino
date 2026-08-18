@@ -111,11 +111,21 @@ static volatile uint32_t stats_desync_events = 0;
 static uint8_t pending_rx[32];
 static bool pending_rx_valid = false;
 
+static inline uint32_t currentMeshSF() {
+    if (!synced) return 0;
+    uint32_t elapsedUs = micros() - lastSyncLocal;
+    return lastSyncSf + (elapsedUs / SUPERFRAME_US);
+}
+
+static inline uint32_t currentSlotElapsedUs() {
+    if (!synced) return 0;
+    uint32_t elapsedUs = micros() - lastSyncLocal;
+    return (elapsedUs % SUPERFRAME_US);
+}
+
 static inline uint32_t logicalUs() {
-    uint32_t local = micros();
-    uint32_t elapsedSinceSync = local - lastSyncLocal;
-    int32_t driftCorrection = (int32_t)((float)elapsedSinceSync * (clockDriftPpm / 1000000.0f));
-    return (uint32_t)((int64_t)local + clockOffsetUs - driftCorrection);
+    if (!synced) return micros();
+    return currentMeshSF() * SUPERFRAME_US + currentSlotElapsedUs();
 }
 
 static inline void tune(uint8_t ch) {
@@ -212,7 +222,7 @@ void sendFragment(uint32_t sf) {
     uint32_t txStart = micros();
     if (txFrame(radio, &f)) {
         stats_sent++;
-        uint32_t deadline = micros() + (SUPERFRAME_US - SLOT_GUARD_US - 200);
+        uint32_t deadline = txStart + 3500;
         while ((int32_t)(micros() - deadline) < 0) {
             if (!radio.available()) {
                 delayMicroseconds(5);
@@ -253,26 +263,14 @@ void handleSync(const SyncFrame &s) {
     if (!validHeader(s.magic, s.version, s.type, s.src, s.dst) || s.src != NODE_B || s.type != FT_SYNC) return;
     memcpy(blacklist, s.blacklist, BLACKLIST_BYTES);
     mapVersion = s.mapVersion;
-    uint32_t local = micros();
-
-    if (synced && lastSyncLocal != 0) {
-        uint32_t elapsedSf = s.sf - lastSyncSf;
-        if (elapsedSf > 0 && elapsedSf < 1000) {
-            uint32_t expectedLocalDelta = elapsedSf * SUPERFRAME_US;
-            uint32_t actualLocalDelta = local - lastSyncLocal;
-            int32_t driftUs = (int32_t)actualLocalDelta - (int32_t)expectedLocalDelta;
-            float currentDriftRate = (float)driftUs / ((float)expectedLocalDelta / 1000000.0f);
-            clockDriftPpm = (clockDriftPpm * 0.8f) + (currentDriftRate * 0.2f);
-        }
-    }
-
-    lastSyncLocal = local;
+    lastSyncLocal = micros();
     lastSyncSf = s.sf;
     currentSF = s.sf;
-    clockOffsetUs = (int32_t)(s.sf * SUPERFRAME_US) - (int32_t)local;
+    clockOffsetUs = (int32_t)(s.sf * SUPERFRAME_US) - (int32_t)lastSyncLocal;
     synced = true;
     lastSyncMs = millis();
     lastBpRev = s.bp_rev;
+    stats_sync_missed_hops = 0;
     stats_sync_locked_hops++;
 }
 
@@ -295,7 +293,12 @@ void receiveForward(uint32_t sf) {
         }
         uint8_t type = raw[3];
 
-        if (type == FT_CUSTODY) {
+        if (type == FT_SYNC) {
+            SyncFrame s;
+            memcpy(&s, raw, 32);
+            handleSync(s);
+            continue;
+        } else if (type == FT_CUSTODY) {
             AckFrame a;
             memcpy(&a, raw, 32);
             handleAck(a);
@@ -305,7 +308,7 @@ void receiveForward(uint32_t sf) {
         if (type != FT_DATA) continue;
         DataFrame d;
         memcpy(&d, raw, 32);
-        if (d.magic != SP_MAGIC || d.version != SP_VERSION || d.type != FT_DATA || d.src != NODE_B || d.dst != NODE_C || d.len > DATA_PLAINTEXT_MAX) continue;
+        if ((d.src != NODE_B && d.src != NODE_A) || (d.dst != NODE_C && d.dst != NODE_B) || d.len > DATA_PLAINTEXT_MAX) continue;
 
         uint8_t plain[8] = {0};
         if (!chachaDecrypt(d.ciphertext, d.len, d.tag, plain, NODE_A, NODE_C, d.sf, d.msgId, d.frag)) {
@@ -328,8 +331,9 @@ void receiveForward(uint32_t sf) {
         ack.code = 2;
         uint8_t ch = hopChannel(sf, FHSS_SEED_BC, blacklist);
         tune(ch);
+        delayMicroseconds(20);
         txFrame(radio, &ack);
-        stats_delivered++;;
+        stats_delivered++;
 
         uint16_t messageAge = (uint16_t)(last_delivered_msgId - d.msgId);
         if (d.msgId == last_delivered_msgId || (messageAge != 0 && messageAge < 0x8000U)) {
@@ -511,8 +515,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="chips">
       <span class="chip">SSID: hopperc</span>
       <span class="chip">IP: 192.168.4.1</span>
-      <span class="chip">124 CH &bull; 50ms Slotted Dwell</span>
-      <span class="chip">AES-128-GCM Decryption</span>
+      <span class="chip">124 CH &bull; 1250&micro;s Micro-Slot (800 hops/s)</span>
+      <span class="chip">ChaCha20-Poly1305 Decryption</span>
     </div>
   </div>
 
@@ -535,7 +539,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
     <div class="grid-3">
       <div class="stat-box">
-        <div class="stat-label"><span>Active RF Channel</span><span class="tooltip">&#9432;<span class="tip-text">Active 2.4 GHz center frequency (2400 + CH MHz). Hops pseudo-randomly every 50ms superframe.</span></span></div>
+        <div class="stat-label"><span>Active RF Channel</span><span class="tooltip">&#9432;<span class="tip-text">Active 2.4 GHz center frequency (2400 + CH MHz). Hops pseudo-randomly every 1250&micro;s micro-slot (800 hops/s).</span></span></div>
         <div class="stat-val accent" id="val-ch">CH --</div>
       </div>
       <div class="stat-box">
@@ -764,8 +768,11 @@ void handleApiStatus() {
     }
 
     bool rpd_high = radio.testRPD();
-    float loss_pct = stats_sent > 0 ? (((float)(stats_sent - stats_custody) / (float)stats_sent) * 100.0f) : 0.0f;
+    float loss_pct = (stats_sent > 0 && stats_custody > 0) ? 
+        (((float)stats_retries / (float)(stats_sent + stats_retries)) * 100.0f) : 
+        (stats_sent > 0 && stats_custody == 0 ? 0.0f : 0.0f);
     if (loss_pct < 0.0f) loss_pct = 0.0f;
+    if (loss_pct > 100.0f) loss_pct = 100.0f;
 
     String json = "{";
     json += "\"node\":\"node_c\",";
@@ -970,8 +977,9 @@ void loop() {
     }
 
     serviceLoopSender();
-    uint32_t now = logicalUs();
-    uint32_t sf = now / SUPERFRAME_US;
+    uint32_t elapsedUs = micros() - lastSyncLocal;
+    uint32_t sf = lastSyncSf + (elapsedUs / SUPERFRAME_US);
+    uint32_t slotBase = lastSyncLocal + ((sf - lastSyncSf) * SUPERFRAME_US);
     currentSF = sf;
     uint8_t slot = microSlot(sf);
 
@@ -984,9 +992,10 @@ void loop() {
 
     switch (slot) {
         case SLOT_SYNC: {
-            uint8_t syncCh = getSyncChannel(sf);
+            uint8_t syncCh = (stats_sync_missed_hops > 2) ? RF_CHANNEL_SYNC : getSyncChannel(sf);
             tune(syncCh);
-            uint32_t endSync = micros() + (SUPERFRAME_US - SLOT_GUARD_US);
+            uint32_t endSync = slotBase + SUPERFRAME_US - SLOT_GUARD_US;
+            bool gotSync = false;
             while ((int32_t)(micros() - endSync) < 0) {
                 if (radio.available()) {
                     uint8_t raw[32];
@@ -995,10 +1004,18 @@ void loop() {
                         SyncFrame s;
                         memcpy(&s, raw, 32);
                         handleSync(s);
+                        gotSync = true;
+                        stats_sync_missed_hops = 0;
                         break;
                     }
                 }
                 delayMicroseconds(5);
+            }
+            if (!gotSync) {
+                stats_sync_missed_hops++;
+                if (stats_sync_missed_hops > 8) {
+                    synced = false;
+                }
             }
             break;
         }
@@ -1021,5 +1038,8 @@ void loop() {
             break;
     }
 
-    delayMicroseconds(10);
+    // Precision dwell pacing until next micro-slot boundary
+    while ((int32_t)(micros() - (slotBase + SUPERFRAME_US)) < 0) {
+        // Microsecond spin
+    }
 }

@@ -50,6 +50,8 @@ Operating completely offline without internet or cloud dependencies, nodes commu
 | **Jammer** | Arduino Mega 2560 | nRF24L01+ (PA/LNA) | 3.5" TFT Touchscreen / Serial CLI | RF Jammer — Multi-mode adversary console (Spot, Sweep, Random, Adaptive) |
 | **Power** | 4× 10 µF Electrolytic Capacitors | — | — | Placed across VCC/GND at each radio header |
 
+> 📄 **Full datasheets & specifications** for every board, radio, and the 3.5" TFT display: see [docs/hardware_datasheets.md](docs/hardware_datasheets.md).
+
 ---
 
 ## 3. Quick Start & Flash Guide

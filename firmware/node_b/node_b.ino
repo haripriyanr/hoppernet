@@ -17,7 +17,7 @@
 
 #define QUEUE_MAX       64
 #define RELAY_LOG_MAX   12
-#define MAX_LINK_ATTEMPTS 4
+#define MAX_LINK_ATTEMPTS 64
 #define MAX_DRAIN_PER_WINDOW 1
 #define DELIVERY_ACK_WAIT_US 5500UL
 
@@ -232,6 +232,7 @@ void receiveFromA(uint32_t slotStart) {
         
         rxA++;
         if (d.msgId == last_seen_msgId_a && d.frag == last_seen_frag_a) {
+            delayMicroseconds(20);
             sendAck(NODE_A, sfNow, d.msgId, d.frag, FT_CUSTODY);
             Serial.printf("HANDSHAKE|B|DUP_ACK|msg=%u|frag=%u|sf=%lu\n", d.msgId, d.frag, (unsigned long)sfNow);
             break;
@@ -241,6 +242,7 @@ void receiveFromA(uint32_t slotStart) {
         last_seen_frag_a = d.frag;
 
         if (qPush(qAC, qACHead, qACCount, d)) {
+            delayMicroseconds(20);
             sendAck(NODE_A, sfNow, d.msgId, d.frag, FT_CUSTODY);
             ackA++;
             if (qACCount > qACHighWater) qACHighWater = qACCount;
@@ -271,6 +273,7 @@ void receiveFromC(uint32_t slotStart) {
         rxC++;
         lastCDeliveryMs = millis();
         if (d.msgId == last_seen_msgId_c && d.frag == last_seen_frag_c) {
+            delayMicroseconds(20);
             sendAck(NODE_C, sfNow, d.msgId, d.frag, FT_CUSTODY);
             Serial.printf("HANDSHAKE|B|DUP_ACK|dir=C->B|msg=%u|frag=%u|sf=%lu\n", d.msgId, d.frag, (unsigned long)sfNow);
             break;
@@ -280,6 +283,7 @@ void receiveFromC(uint32_t slotStart) {
         last_seen_frag_c = d.frag;
 
         if (qPush(qCA, qCAHead, qCACount, d)) {
+            delayMicroseconds(20);
             sendAck(NODE_C, sfNow, d.msgId, d.frag, FT_CUSTODY);
             ackC++;
             if (qCACount > qCAHighWater) qCAHighWater = qCACount;
@@ -552,11 +556,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
     <div class="grid-3">
       <div class="stat-box">
-        <div class="stat-label"><span>Active RF Channel</span><span class="tooltip">&#9432;<span class="tip-text">Master superframe RF center frequency (2400 + CH MHz). Broadcasts SYNC beacons and hops every 50ms.</span></span></div>
+        <div class="stat-label"><span>Active RF Channel</span><span class="tooltip">&#9432;<span class="tip-text">Master superframe RF center frequency (2400 + CH MHz). Broadcasts SYNC beacons and hops every 625&micro;s (1,600 hops/s).</span></span></div>
         <div class="stat-val accent" id="val-ch">CH --</div>
       </div>
       <div class="stat-box">
-        <div class="stat-label"><span>Superframe Hop</span><span class="tooltip">&#9432;<span class="tip-text">Master superframe sequence counter incremented every 50ms. Anchors network-wide hopping PRNG seed.</span></span></div>
+        <div class="stat-label"><span>Superframe Hop</span><span class="tooltip">&#9432;<span class="tip-text">Master superframe sequence counter incremented every 625&micro;s. Anchors network-wide hopping PRNG seed.</span></span></div>
         <div class="stat-val" id="val-sf">#0</div>
       </div>
       <div class="stat-box">
@@ -870,7 +874,7 @@ void setup() {
 
     // 3. Initialize Radio
     if (radioCommonBegin(radio)) {
-        Serial.println(F("[NODE_B] RF24 initialized at 2Mbps. 625us master clock (1600 hops/sec) with ChaCha20-Poly1305."));
+        Serial.println(F("[NODE_B] RF24 initialized at 2Mbps. 1250us master clock (800 hops/sec) with ChaCha20-Poly1305."));
     } else {
         Serial.println(F("[NODE_B] RF24 INIT FAILED. Check 3.3V, CE=4, CSN=5, SPI=18/19/23."));
     }
@@ -887,7 +891,7 @@ void setup() {
     );
 }
 
-// ---------------- Real-Time 625 us Micro-Slot Loop (Core 1) ----------------
+// ---------------- Real-Time 1250 us Micro-Slot Loop (Core 1) ----------------
 void loop() {
     uint32_t slotStart = micros();
     uint8_t slot = microSlot(sfNow);
@@ -928,7 +932,7 @@ void loop() {
         portEXIT_CRITICAL(&queueMux);
     }
 
-    // Precision dwell pacing for 625us slot
+    // Precision dwell pacing for 1250us slot
     while ((int32_t)(micros() - (slotStart + SUPERFRAME_US)) < 0) {
         // Microsecond spin
     }

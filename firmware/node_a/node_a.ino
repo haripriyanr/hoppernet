@@ -91,11 +91,21 @@ struct InboundMsg {
 static InboundMsg in_history[HISTORY_SIZE];
 static volatile int ih_count = 0;
 
+static inline uint32_t currentMeshSF() {
+    if (!synced) return 0;
+    uint32_t elapsedUs = micros() - lastSyncLocal;
+    return lastSyncSf + (elapsedUs / SUPERFRAME_US);
+}
+
+static inline uint32_t currentSlotElapsedUs() {
+    if (!synced) return 0;
+    uint32_t elapsedUs = micros() - lastSyncLocal;
+    return (elapsedUs % SUPERFRAME_US);
+}
+
 static inline uint32_t logicalUs() {
-    uint32_t local = micros();
-    uint32_t elapsedSinceSync = local - lastSyncLocal;
-    int32_t driftCorrection = (int32_t)((float)elapsedSinceSync * (clockDriftPpm / 1000000.0f));
-    return (uint32_t)((int64_t)local + clockOffsetUs - driftCorrection);
+    if (!synced) return micros();
+    return currentMeshSF() * SUPERFRAME_US + currentSlotElapsedUs();
 }
 
 static inline void tune(uint8_t ch) {
@@ -158,26 +168,14 @@ void handleSync(const SyncFrame &s) {
     if (!validHeader(s.magic, s.version, s.type, s.src, s.dst) || s.src != NODE_B || s.type != FT_SYNC) return;
     memcpy(blacklist, s.blacklist, BLACKLIST_BYTES);
     mapVersion = s.mapVersion;
-    uint32_t localAtRx = micros();
-
-    if (synced && lastSyncLocal != 0) {
-        uint32_t elapsedSf = s.sf - lastSyncSf;
-        if (elapsedSf > 0 && elapsedSf < 1000) {
-            uint32_t expectedLocalDelta = elapsedSf * SUPERFRAME_US;
-            uint32_t actualLocalDelta = localAtRx - lastSyncLocal;
-            int32_t driftUs = (int32_t)actualLocalDelta - (int32_t)expectedLocalDelta;
-            float currentDriftRate = (float)driftUs / ((float)expectedLocalDelta / 1000000.0f);
-            clockDriftPpm = (clockDriftPpm * 0.8f) + (currentDriftRate * 0.2f);
-        }
-    }
-
-    lastSyncLocal = localAtRx;
+    lastSyncLocal = micros();
     lastSyncSf = s.sf;
     currentSF = s.sf;
-    clockOffsetUs = (int32_t)(s.sf * SUPERFRAME_US) - (int32_t)localAtRx;
+    clockOffsetUs = (int32_t)(s.sf * SUPERFRAME_US) - (int32_t)lastSyncLocal;
     synced = true;
     lastSyncMs = millis();
     lastBpFwd = s.bp_fwd;
+    stats_sync_missed_hops = 0;
     stats_sync_locked_hops++;
 }
 
@@ -230,7 +228,7 @@ void sendDataFragment(uint32_t sf) {
     uint32_t txStart = micros();
     if (txFrame(radio, &f)) {
         stats_sent++;
-        uint32_t deadline = micros() + (SUPERFRAME_US - SLOT_GUARD_US - 200);
+        uint32_t deadline = txStart + 3500;
         while ((int32_t)(micros() - deadline) < 0) {
             if (!radio.available()) {
                 delayMicroseconds(5);
@@ -300,22 +298,28 @@ void receiveDownlink(uint32_t sf) {
         } else if (radio.available()) {
             radio.read(raw, 32);
             have = true;
+            Serial.printf("[NODE_A] RAW_RX|type=%u|src=%u|dst=%u|sf=%lu\n", raw[3], raw[4], raw[5], (unsigned long)sf);
         }
         if (!have) {
             delayMicroseconds(5);
             continue;
         }
         uint8_t type = raw[3];
-        if (type == FT_CUSTODY || type == FT_DELIVERY) {
+        if (type == FT_SYNC) {
+            SyncFrame s;
+            memcpy(&s, raw, 32);
+            handleSync(s);
+            continue;
+        } else if (type == FT_CUSTODY || type == FT_DELIVERY) {
             AckFrame a;
             memcpy(&a, raw, 32);
             processAck(a);
         } else if (type == FT_DATA) {
             DataFrame d;
             memcpy(&d, raw, 32);
-            if (d.src == NODE_B && d.dst == NODE_A && d.type == FT_DATA && d.len <= DATA_PLAINTEXT_MAX) {
+            if ((d.src == NODE_B || d.src == NODE_C) && (d.dst == NODE_A || d.dst == NODE_B) && d.len <= DATA_PLAINTEXT_MAX) {
                 uint8_t plain[8] = {0};
-                if (gcmDecrypt(d.ciphertext, d.len, d.tag, plain, NODE_C, NODE_A, d.sf, d.msgId, d.frag)) {
+                if (chachaDecrypt(d.ciphertext, d.len, d.tag, plain, NODE_C, NODE_A, d.sf, d.msgId, d.frag)) {
                     AckFrame ack{};
                     ack.magic = SP_MAGIC;
                     ack.version = SP_VERSION;
@@ -328,10 +332,10 @@ void receiveDownlink(uint32_t sf) {
                     ack.code = 2;
                     uint8_t ch = hopChannel(sf, FHSS_SEED_AB, blacklist);
                     tune(ch);
+                    delayMicroseconds(20);
                     txFrame(radio, &ack);
                     stats_delivered++;
-
-                    if (returnAlreadyDelivered(d.msgId)) continue;
+                    Serial.printf("[NODE_A] RETURN_FRAG|msg=%u|frag=%u/%u|len=%u\n", d.msgId, d.frag + 1, d.total, d.len);
 
                     if (!ret_asm.active || ret_asm.msgId != d.msgId) {
                         memset(&ret_asm, 0, sizeof(ret_asm));
@@ -367,11 +371,14 @@ void receiveDownlink(uint32_t sf) {
                             portEXIT_CRITICAL(&queueMux);
 
                             markReturnDelivered(ret_asm.msgId);
+                            Serial.printf("[NODE_A] RECV RETURN COMPLETE: msg=%u, bytes=%u, data=\"%s\"\n", ret_asm.msgId, ret_asm.length, fullMsg);
                             stats_received++;
                             if (ret_asm.recovered) stats_recovered++;
                             memset(&ret_asm, 0, sizeof(ret_asm));
                         }
                     }
+                } else {
+                    Serial.printf("[NODE_A] AUTH_FAIL|msg=%u|frag=%u\n", d.msgId, d.frag);
                 }
             }
         }
@@ -509,8 +516,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="chips">
       <span class="chip">SSID: hoppera</span>
       <span class="chip">IP: 192.168.4.1</span>
-      <span class="chip">124 CH &bull; 50ms Slotted Dwell</span>
-      <span class="chip">AES-128-GCM E2E Security</span>
+      <span class="chip">124 CH &bull; 1250&micro;s Micro-Slot (800 hops/s)</span>
+      <span class="chip">ChaCha20-Poly1305 256-bit AEAD</span>
     </div>
   </div>
 
@@ -533,7 +540,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
     <div class="grid-3">
       <div class="stat-box">
-        <div class="stat-label"><span>Active RF Channel</span><span class="tooltip">&#9432;<span class="tip-text">Active 2.4 GHz center frequency (2400 + CH MHz). Hops pseudo-randomly every 50ms superframe.</span></span></div>
+        <div class="stat-label"><span>Active RF Channel</span><span class="tooltip">&#9432;<span class="tip-text">Active 2.4 GHz center frequency (2400 + CH MHz). Hops pseudo-randomly every 1250&micro;s micro-slot (800 hops/s).</span></span></div>
         <div class="stat-val accent" id="val-ch">CH --</div>
       </div>
       <div class="stat-box">
@@ -760,8 +767,11 @@ void handleApiStatus() {
     }
 
     bool rpd_high = radio.testRPD();
-    float loss_pct = stats_sent > 0 ? (((float)(stats_sent - stats_custody) / (float)stats_sent) * 100.0f) : 0.0f;
+    float loss_pct = (stats_sent > 0 && stats_custody > 0) ? 
+        (((float)stats_retries / (float)(stats_sent + stats_retries)) * 100.0f) : 
+        (stats_sent > 0 && stats_custody == 0 ? 0.0f : 0.0f);
     if (loss_pct < 0.0f) loss_pct = 0.0f;
+    if (loss_pct > 100.0f) loss_pct = 100.0f;
 
     String json = "{";
     json += "\"node\":\"node_a\",";
@@ -958,8 +968,9 @@ void loop() {
     }
 
     serviceLoopSender();
-    uint32_t now = logicalUs();
-    uint32_t sf = now / SUPERFRAME_US;
+    uint32_t elapsedUs = micros() - lastSyncLocal;
+    uint32_t sf = lastSyncSf + (elapsedUs / SUPERFRAME_US);
+    uint32_t slotBase = lastSyncLocal + ((sf - lastSyncSf) * SUPERFRAME_US);
     currentSF = sf;
     uint8_t slot = microSlot(sf);
 
@@ -972,9 +983,10 @@ void loop() {
 
     switch (slot) {
         case SLOT_SYNC: {
-            uint8_t syncCh = getSyncChannel(sf);
+            uint8_t syncCh = (stats_sync_missed_hops > 2) ? RF_CHANNEL_SYNC : getSyncChannel(sf);
             tune(syncCh);
-            uint32_t endSync = micros() + (SUPERFRAME_US - SLOT_GUARD_US);
+            uint32_t endSync = slotBase + SUPERFRAME_US - SLOT_GUARD_US;
+            bool gotSync = false;
             while ((int32_t)(micros() - endSync) < 0) {
                 if (radio.available()) {
                     uint8_t raw[32];
@@ -983,10 +995,18 @@ void loop() {
                         SyncFrame s;
                         memcpy(&s, raw, 32);
                         handleSync(s);
+                        gotSync = true;
+                        stats_sync_missed_hops = 0;
                         break;
                     }
                 }
                 delayMicroseconds(5);
+            }
+            if (!gotSync) {
+                stats_sync_missed_hops++;
+                if (stats_sync_missed_hops > 8) {
+                    synced = false;
+                }
             }
             break;
         }
@@ -1009,5 +1029,8 @@ void loop() {
             break;
     }
 
-    delayMicroseconds(10);
+    // Precision dwell pacing until next micro-slot boundary
+    while ((int32_t)(micros() - (slotBase + SUPERFRAME_US)) < 0) {
+        // Microsecond spin
+    }
 }

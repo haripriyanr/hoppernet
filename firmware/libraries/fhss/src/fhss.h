@@ -27,13 +27,38 @@
 #define NODE_B            2
 #define NODE_C            3
 
+// ---------------- 1250 us RF Hop Slot Timing ----------------
+// Master Superframe advances every 1250 us (800 hops/sec).
+// Micro-slot cycle: 6 slots = 7.5 ms full bidirectional mesh exchange:
+// Slot 0 (SYNC)   : Node B broadcasts SYNC + Blacklist + Backpressure on Anchor/CH0
+// Slot 1 (A->B)   : Node A transmits forward data fragment to Node B (AB channel)
+// Slot 2 (B->C)   : Node B forward-drains queued fragment to Node C (BC channel)
+// Slot 3 (C->B)   : Node C transmits return telemetry fragment to Node B (BC channel)
+// Slot 4 (B->A)   : Node B return-drains queued fragment to Node A (AB channel)
+// Slot 5 (MAINT)  : RPD Jammer detector scan & link health maintenance
+#define SUPERFRAME_US     1250UL      // 1250 us RF hop/dwell slot
+#define HOPS_PER_SEC      800         // Actual RF hop rate
+#define DISPLAY_HOPS_SEC  20          // WebUI spectrum stream sample size
+#define MICRO_SLOTS       6           // 6-slot bidirectional round-robin
+#define SLOT_SYNC         0
+#define SLOT_AB_RX        1           // Node B perspective: receive from A
+#define SLOT_BC_TX        2           // Node B perspective: drain to C
+#define SLOT_BC_RX        3           // Node B perspective: receive from C
+#define SLOT_AB_TX        4           // Node B perspective: drain to A
+#define SLOT_MAINT        5           // RPD probe / maintenance
+#define SLOT_GUARD_US     80UL        // Reserved tail inside each 1250 us slot
+
+static inline uint8_t microSlot(uint32_t sf) {
+    return (uint8_t)(sf % MICRO_SLOTS);
+}
+
 // ---------------- RF Spectrum Configuration ----------------
 #define NUM_SYNC_ANCHORS  4
 // Anchors live at 2.483-2.513 GHz, above all Wi-Fi 1/6/11 bands (ends ~2.473 GHz)
 static const uint8_t SYNC_ANCHORS[NUM_SYNC_ANCHORS] = { 83, 93, 103, 113 };
 
 static inline uint8_t getSyncChannel(uint32_t sf) {
-    return SYNC_ANCHORS[sf & 0x03];
+    return SYNC_ANCHORS[(sf / MICRO_SLOTS) % NUM_SYNC_ANCHORS];
 }
 
 #define RF_CHANNEL_SYNC   0        // Primary rendezvous / recovery channel
@@ -61,31 +86,6 @@ static inline uint8_t getSyncChannel(uint32_t sf) {
 #define DWELL_US          SUPERFRAME_US
 #define NUM_ANCHOR_CHANNELS NUM_SYNC_ANCHORS
 static const uint8_t ANCHOR_CHANNELS[NUM_ANCHOR_CHANNELS] = { 83, 93, 103, 113 };
-
-// ---------------- 625 us RF Hop Slot Timing ----------------
-// Master Superframe advances every 625 us (1,600 hops/sec).
-// Micro-slot cycle: 6 slots = 3.75 ms full bidirectional mesh exchange:
-// Slot 0 (SYNC)   : Node B broadcasts SYNC + Blacklist + Backpressure on Anchor/CH0
-// Slot 1 (A->B)   : Node A transmits forward data fragment to Node B (AB channel)
-// Slot 2 (B->C)   : Node B forward-drains queued fragment to Node C (BC channel)
-// Slot 3 (C->B)   : Node C transmits return telemetry fragment to Node B (BC channel)
-// Slot 4 (B->A)   : Node B return-drains queued fragment to Node A (AB channel)
-// Slot 5 (MAINT)  : RPD Jammer detector scan & link health maintenance
-#define SUPERFRAME_US     625UL       // 625 us RF hop/dwell slot
-#define HOPS_PER_SEC      1600        // Actual RF hop rate
-#define DISPLAY_HOPS_SEC  20          // WebUI spectrum stream sample size
-#define MICRO_SLOTS       6           // 6-slot bidirectional round-robin
-#define SLOT_SYNC         0
-#define SLOT_AB_RX        1           // Node B perspective: receive from A
-#define SLOT_BC_TX        2           // Node B perspective: drain to C
-#define SLOT_BC_RX        3           // Node B perspective: receive from C
-#define SLOT_AB_TX        4           // Node B perspective: drain to A
-#define SLOT_MAINT        5           // RPD probe / maintenance
-#define SLOT_GUARD_US     40UL        // Reserved tail inside each 625 us slot
-
-static inline uint8_t microSlot(uint32_t sf) {
-    return (uint8_t)(sf % MICRO_SLOTS);
-}
 
 // ---------------- Protocol Constants & Packet Structures ----------------
 #define SP_MAGIC          0x5350
